@@ -797,6 +797,39 @@ or written):
 Not explained: what starts QDA and Netflix_Splash. Both files are read once,
 so a mount after the read changes nothing until the next boot.
 
+### Lever 1 in practice: `early.sh` (way back written before the change)
+
+Files: `native/tv/early-prepare.sh` builds `/var/local/vibe/am_config.trim`
+on the TV from `/basic/am_config` (16 `power_on_start = true` lines set to
+false: AirPlayBridge, ota_upgrade, hi_logreport_service, resmon,
+app_upgrade, HiAvsService, mosquitto, dialserver, ai_manager,
+vidaa_ai_service, websdk, TTSPlayer, netflix, masman, mdharvester,
+reggieserver; nothing else changes) and records both md5s in
+`am_config.md5`. `native/tv/early.sh`, started in the background by two
+lines in the hook's first stage (marked `vidaa-vibe-early`, ~5.3 s),
+bind-mounts the copy over `/basic/am_config` before `app_man` parses it
+(~6.5 s). It acts only when armed: `/var/local/vibe/early.arm` (one boot,
+deleted after mounting) or `/var/local/vibe/early.on` (every boot); never
+with any off switch (`vibe/off`, `vibe-off`, `vibe-stock`,
+`vibe/debloat.off`); never if either md5 differs (e.g. after a firmware
+update). It writes `early.pending` after mounting; `debloat.sh` removes it
+once `vibe-ui` runs and `hisenseUI` has appeared (proof that `app_man`
+parsed the copy). If a boot never gets there, the next boot finds
+`early.pending`, skips the overlay and deletes the marker: a bad overlay
+costs one boot and heals itself without SSH. Nothing is written to a
+verified partition; the bind mount ends at reboot.
+
+Way back:
+- Stop using it: `rm /var/local/vibe/early.on /var/local/vibe/early.arm`
+  (takes effect at the next boot; the mount of the current boot stays
+  until then, harmless: `app_man` read the file once).
+- Take the hook lines out: `HOOK_STEP=early-revert sh
+  /var/local/vibe/hook-patch.sh` (in place, keeps the UhisWebsdk owner;
+  `otaTest.prev.bak` is not involved). Our copy of the hook before the
+  change: `/var/local/vibe/hook/otaTest.before-early`.
+- Remove everything: also `rm /var/local/vibe/early.sh
+  /var/local/vibe/am_config.trim /var/local/vibe/am_config.md5`.
+
 ## To revisit: unused remote buttons
 
 The shortcut button next to MENU, MTS, CC, the mic button, the dash key and

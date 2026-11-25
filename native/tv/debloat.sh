@@ -208,7 +208,16 @@ ui_pass() {
     # vibe-ui may start before the stock engine: wait for the engine (up to
     # a minute of uptime), so it is stopped, not missed
     u=$(up); u=${u%.*}
-    [ -z "$(pidof hisenseUI)" ] && [ "$u" -lt 60 ] && return
+    engine=$(pidof hisenseUI)
+    [ -z "$engine" ] && [ "$u" -lt 60 ] && return
+    # early.sh's overlay worked if app_man got as far as starting the engine:
+    # confirm it, so the next boot overlays again (an unconfirmed boot makes
+    # the next one skip the overlay)
+    if [ -n "$engine" ] && [ -f $V/early.pending ]; then
+        rm -f $V/early.pending
+        sync
+        echo "uptime $(up) early overlay confirmed (hisenseUI $engine started)"
+    fi
     killed=""; frozen=""
     scan_kill "app_man"
     sleep 2

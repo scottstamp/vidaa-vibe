@@ -6,6 +6,11 @@
 #                     the block before 'echo "--- main done"', syntax-check,
 #                     write in place
 #   HOOK_STEP=revert  write otaTest.prev.bak back over otaTest.sh (in place)
+#   HOOK_STEP=early-check|early-apply|early-revert
+#                     the same for the two early.sh lines in the hook's first
+#                     stage (marked vidaa-vibe-early); early-apply keeps a
+#                     copy in /var/local/vibe/hook/otaTest.before-early and
+#                     does not touch otaTest.prev.bak
 set -u
 BB=/usr/local/bin/busybox
 H=/var/local/otaTest.sh
@@ -31,7 +36,48 @@ make_new() {
     return 0
 }
 
+# The early lines: in the hook's first stage (rc.local's own call, ~5.3 s,
+# before it detaches), right after it logs its start time, start early.sh in
+# the background. Both lines carry the marker, so taking them out is a filter.
+EARLY_ANCHOR='  cat /proc/uptime >> "$L"'
+early_new() {
+    if grep -q "vidaa-vibe-early" $H; then echo "early lines already in"; return 1; fi
+    n=$(grep -c -x -F "$EARLY_ANCHOR" $H)
+    [ "$n" = 1 ] || { echo "early anchor found $n times (want 1)"; return 1; }
+    $BB awk -v anchor="$EARLY_ANCHOR" '
+      { print }
+      $0 == anchor {
+        print "  # vidaa-vibe-early: overlay the trimmed app_man config before app_man reads it"
+        print "  [ -f /var/local/vibe/early.sh ] && $BB setsid /bin/sh /var/local/vibe/early.sh </dev/null >/dev/null 2>&1 &  # vidaa-vibe-early"
+      }' $H > $W/otaTest.early.new
+    /bin/sh -n $W/otaTest.early.new || { echo "syntax check FAILED"; return 1; }
+    echo "--- diff (line counts: $($BB wc -l < $H) vs $($BB wc -l < $W/otaTest.early.new))"
+    $BB diff $H $W/otaTest.early.new
+    return 0
+}
+
 case "${HOOK_STEP:-}" in
+early-check)
+    ls -la $H; md5sum $H
+    early_new
+    ;;
+early-apply)
+    early_new || exit 1
+    cat $H > $W/otaTest.before-early    # our copy of the hook as it is now
+    sync
+    cat $W/otaTest.early.new > $H         # in place: keeps the UhisWebsdk owner
+    sync
+    ls -la $H; md5sum $H $W/otaTest.before-early $W/otaTest.early.new
+    /bin/sh -n $H && echo "installed hook syntax OK"
+    ;;
+early-revert)
+    grep -q "vidaa-vibe-early" $H || { echo "no early lines in the hook"; exit 0; }
+    grep -v "vidaa-vibe-early" $H > $W/otaTest.noearly.new
+    /bin/sh -n $W/otaTest.noearly.new || { echo "syntax check FAILED; nothing written"; exit 1; }
+    cat $W/otaTest.noearly.new > $H
+    sync
+    ls -la $H; md5sum $H
+    ;;
 check)
     ls -la $H $P; md5sum $H $P
     make_new
