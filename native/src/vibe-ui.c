@@ -216,6 +216,10 @@ struct app {
      int  sleep_warned;            /* the last-minute countdown is showing */
      int  sleep_kind;              /* OFF_TIMER or OFF_NOSIG, 0 when not armed */
      int  nosig_standby;           /* setting: switch off after 15 min with no signal */
+     /* navigation to the HDMI-CEC device while no panel is open */
+     int  cec_fwd_ok;              /* CEC on, HDMI input, device ready for remote */
+     int  cec_held;                /* syskey pressed and not yet released, 0 none */
+     double cec_release_at;        /* release then if no key-up / repeat came */
      double next_sleep_tick;
      int  page;                             /* settings page shown */
      double confirm_until;                  /* an action row waits for its 2nd OK */
@@ -1686,6 +1690,46 @@ static void key_rename(struct app *a, int k, int repeat, double now)
      }
 }
 
+/* ---- navigation keys to the HDMI-CEC device (the Chromecast on HDMI2)
+ * while no panel is open. The stock UI answered systemserver "not handled"
+ * and its CecClient did this; with the stock engine gone we call the same
+ * model action ourselves. Volume is not touched: the system sends it to the
+ * soundbar on its own (hot-key path). */
+#define CEC_PRESSED  1
+#define CEC_REPEAT   2
+#define CEC_RELEASED 8
+
+static int cec_syskey(int k)
+{
+     switch (k) {
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: return 23;
+     case DIKS_CURSOR_UP:    return 24;
+     case DIKS_CURSOR_DOWN:  return 25;
+     case DIKS_CURSOR_LEFT:  return 26;
+     case DIKS_CURSOR_RIGHT: return 27;
+     case DIKS_BACK:         return 76;
+     }
+     return 0;
+}
+
+static void cec_send(int syskey, int state)
+{
+     char sk[12], st[12];
+     snprintf(sk, sizeof(sk), "%d", syskey);
+     snprintf(st, sizeof(st), "%d", state);
+     const char *argv[3] = { sk, "0", st };
+     int r = biz_action(BIZ_ACTION_CEC_REMOTE_KEY, 3, argv);
+     printf("cec key %d state %d -> r=%d\n", syskey, state, r);
+}
+
+static void cec_release(struct app *a)
+{
+     if (a->cec_held) {
+          cec_send(a->cec_held, CEC_RELEASED);
+          a->cec_held = 0;
+     }
+}
+
 static void on_key(struct app *a, int k, int repeat, double now)
 {
      /* in the last minute of the sleep timer any key (POWER aside: the
@@ -1767,6 +1811,22 @@ static void on_key(struct app *a, int k, int repeat, double now)
      case KEY_INPUT:
           if (a->screen != S_QUICK) { open_screen(a, S_QUICK, now); return; }
           break;
+     }
+     /* no panel open: navigation goes to the HDMI-CEC device */
+     if (a->screen == S_NONE && a->cec_fwd_ok) {
+          int sk = cec_syskey(k);
+          if (sk) {
+               if (repeat && a->cec_held == sk) {
+                    cec_send(sk, CEC_REPEAT);
+               } else {
+                    cec_release(a);
+                    cec_send(sk, CEC_PRESSED);
+                    a->cec_held = sk;
+               }
+               /* the IR driver repeats every ~230 ms; no key-up may come */
+               a->cec_release_at = now + 0.3;
+               return;
+          }
      }
      if (repeat && a->screen != S_SETTINGS &&
          k != DIKS_CURSOR_UP && k != DIKS_CURSOR_DOWN &&
@@ -2028,6 +2088,10 @@ int main(int argc, char **argv)
                     }
                     continue;
                }
+               if (we->type == DWET_KEYUP) {
+                    cec_release(a);      /* a key forwarded to CEC was let go */
+                    continue;
+               }
                if (we->type != DWET_KEYDOWN)
                     continue;
                if (we->key_code < 0)    /* IR re-injection duplicate */
@@ -2053,6 +2117,18 @@ int main(int argc, char **argv)
                int scr = 1;
                if (a->sleep_deadline && biz_get_int(BIZ_KEY_SCREEN_STATE, &scr) == 1 && scr == 0)
                     sleep_cancel(a, "standby", now, 0);
+               /* may navigation go to the HDMI-CEC device? */
+               int fn = 0, act = 0, op = 1;
+               biz_get_int(BIZ_KEY_CEC_FUNCTIONALITY, &fn);
+               biz_get_int(BIZ_KEY_CEC_ACTIVE_REMOTE, &act);
+               biz_get_int(BIZ_KEY_CEC_REMOTE_OPMODE, &op);
+               int fwd = fn == 1 && act == 1 && op == 0 && !strncmp(a->cur, "HDMI", 4);
+               if (fwd != a->cec_fwd_ok) {
+                    printf("cec navigation to %s: %s\n", a->cur, fwd ? "on" : "off");
+                    a->cec_fwd_ok = fwd;
+                    if (!fwd)
+                         cec_release(a);
+               }
                int ns = 0;
                if (biz_get_int(BIZ_KEY_NOSIGNAL_STANDBY, &ns) == 1 && (ns == 1) != a->nosig_standby) {
                     a->nosig_standby = ns == 1;
@@ -2060,6 +2136,9 @@ int main(int argc, char **argv)
                }
           }
           sleep_tick(a, now);
+          /* a forwarded key with no repeat or key-up since: let it go */
+          if (a->cec_held && now >= a->cec_release_at)
+               cec_release(a);
           if (now >= a->next_vol) {
                poll_volume(a, now);
                if (now >= a->next_vol)

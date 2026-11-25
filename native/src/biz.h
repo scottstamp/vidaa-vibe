@@ -76,6 +76,14 @@ void   biz_vec_free(char **v);
 #define BIZ_KEY_IGR_SUPPORTED "kilby.sl2.i32.video.instant.game.response.supported"
 /* sleep timer, minutes (modeljs_atsc::TimerFunction::SetHotelmodeSleepTimer) */
 #define BIZ_KEY_SLEEP_TIMER   "kilby.sl2.i32.timerfunctions.hotelmode.sleep.timer"
+/* remote keys to the HDMI-CEC device tvmain tracks as connected (the stock
+ * path: systemserver's CecClient; docs/findings/06). Args, decimal strings:
+ * syskey (OK 23, UP 24, DOWN 25, LEFT 26, RIGHT 27, BACK 76), subsystem 0,
+ * state (1 pressed, 2 auto-repeat, 8 released; 1 and 8 tested). */
+#define BIZ_ACTION_CEC_REMOTE_KEY  "kilby.sl2.cec.send.remote.key"
+#define BIZ_KEY_CEC_FUNCTIONALITY  "kilby.sl2.i32.cec.functionality"
+#define BIZ_KEY_CEC_ACTIVE_REMOTE  "kilby.sl2.i32.cec.device.active.for.remote"
+#define BIZ_KEY_CEC_REMOTE_OPMODE  "kilby.sl2.i32.cec.device.remote.operation.mode"
 /* modeljs.source.InputRename([sourceId, name]) */
 #define BIZ_ACTION_RENAME     "kilby.sl2.action.source.input.rename"
 

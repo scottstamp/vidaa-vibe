@@ -655,8 +655,14 @@ DOWN 25, LEFT 26, RIGHT 27, BACK 76, EXIT 173. Key states from tvmain's
 names `lo::port::KEY_SINGLE`, `KEY_AUTOREP`, `KEY_RELEASED`; the values 1,
 2 and 8 are inferred (bit flags), not yet tested. Volume goes another way
 (`...cec.send.remote.audio.key`, the hot-key path) and is not affected.
-Plan: vibe-ui calls the action itself for those keys when no panel is open
-and the current input is HDMI with the device active for remote.
+Test (2026-11-25, owner on HDMI2): the action with `25 0 1` then `25 0 8`
+sent <User Control Pressed>/<Released> to logical address 4 and the
+Chromecast moved down one step. vibe-ui now does it: with no panel open,
+current input HDMI*, `cec.functionality` 1, `device.active.for.remote` 1
+and `remote.operation.mode` 0 (read every 2 s), UP/DOWN/LEFT/RIGHT/OK/BACK
+are sent as pressed (1), held repeats as 2, released (8) on key-up or 0.3 s
+after the last press/repeat. Owner: works, holding works, volume still goes
+to the soundbar.
 (Research workflow stopped after its mapping stage to save tokens; the
 mapping agents agreed on the action.)
 
