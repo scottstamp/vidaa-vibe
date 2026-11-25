@@ -37,6 +37,17 @@ void   biz_vec_free(char **v);
  * 1 with the stock UI up; a blank page never sets it. */
 #define BIZ_KEY_GUI_LOOP_FINISHED "kilby.sl2.i32.system.gui.loop.finished"
 
+/* picture: keys and actions read in libcobalt (modeljs_atsc::Video) */
+#define BIZ_KEY_PICTURE_MODE  "kilby.sl2.i32.video.enum.picture.adjustment"
+#define BIZ_ACTION_PICTURE_MODE "kilby.sl2.action.video.set.picture.adjustment"
+#define BIZ_KEY_BACKLIGHT     "kilby.sl2.i32.video.backlight"
+#define BIZ_KEY_BRIGHTNESS    "kilby.sl2.i32.video.brightness"
+#define BIZ_KEY_CONTRAST      "kilby.sl2.i32.video.contrast"
+#define BIZ_KEY_COLOUR        "kilby.sl2.i32.video.colour.intensity"
+#define BIZ_KEY_SHARPNESS     "kilby.sl2.i32.video.sharpness"
+/* modeljs.source.InputRename([sourceId, name]) */
+#define BIZ_ACTION_RENAME     "kilby.sl2.action.source.input.rename"
+
 #define BIZ_MAX_INPUTS 16
 
 struct biz_input {
@@ -51,5 +62,10 @@ int biz_inputs(struct biz_input *out, int max);
 int biz_current_input(char *out, int size);
 /* what the stock UI does: action source.switch [now_ms, "9", id] */
 int biz_switch_input(const char *id);
+/* stock: modeljs.video.SetPictureAdjustment([mode, 1, 1]); modes 0..6 =
+ * Dynamic, Standard, Cinema Night, Cinema Day, Game, Sport, Calibrated */
+int biz_set_picture_mode(int mode);
+/* stock: source.InputRename([sourceId, rename]) */
+int biz_rename_input(const char *id, const char *name);
 
 #endif

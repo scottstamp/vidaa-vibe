@@ -143,3 +143,17 @@ int biz_switch_input(const char *id)
      const char *a[3] = { ts, "9", id };   /* 9 = SOURCE_SWITCH_REASON_SWITCH_SOURCE */
      return biz_action(BIZ_ACTION_SWITCH, 3, a);
 }
+
+int biz_set_picture_mode(int mode)
+{
+     char m[16];
+     snprintf(m, sizeof(m), "%d", mode);
+     const char *a[3] = { m, "1", "1" };
+     return biz_action(BIZ_ACTION_PICTURE_MODE, 3, a);
+}
+
+int biz_rename_input(const char *id, const char *name)
+{
+     const char *a[2] = { id, name };
+     return biz_action(BIZ_ACTION_RENAME, 2, a);
+}
