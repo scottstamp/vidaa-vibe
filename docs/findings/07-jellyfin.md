@@ -27,9 +27,17 @@ screen). Raw output: `research/jellyfin/` (gitignored). Code: `native/src/jf.c`,
   `vibe-jf` is a command-line client for jf.c. Tested on the TV: discovery,
   the server check, and Quick Connect up to the code. The steps after
   sign-in need the owner to approve a code.
-- **Not yet known:** whether our own process can drive the video plane, and
-  what it needs (resource manager, source switch, app type). Reverse
-  engineering is below; the first on-screen test needs the owner.
+- **Playback path, from reverse engineering only:** Hisense's `HMP*` API
+  in `libhmplayer.so`, used the way the stock browser uses it for URL
+  playback. `vibe-play` implements it. It loads and resolves every symbol
+  on the TV as the UI user (`--probe`). It has never played anything:
+  that needs the screen, so the first run needs the owner.
+- **Built:**
+  - the panel in vibe-ui: a Jellyfin card on Home leads to server
+    choice, Quick Connect, Home (continue watching, next up, libraries),
+    lists, item detail, and a player with an on-screen display;
+  - `jfui_test`, which drives the panel without DirectFB. Over SSH it got
+    as far as the Quick Connect code.
 
 ## What the TV has
 
@@ -104,6 +112,45 @@ export GST_PLUGIN_PATH=/opt/mmlib/gstreamer-1.0 GST_REGISTRY=/tmp/gstreg.bin
 6. **Firewall.** Rather than the /24 sweep, `debloat.sh` could accept UDP
    from source port 7359. **Chosen: the sweep, no firewall change.**
 
+## Playback path (static analysis; `research/jellyfin/playback-re.md`)
+
+Read from the disassembly of the browser's media backend
+(`libhisense-uva-backend.so`), `libhmplayer.so`, `libgsthsplayer.so`,
+`libesplayerplugin.so` and `libgstessink.so`. Nothing below has been run.
+
+- **`videoessink` on its own plays nothing.** It hands every buffer to a
+  function pointer (`writeDataFunc`) that its owner sets. With none set,
+  it drops the data. A plain `gst-launch` pipeline into it would show
+  nothing.
+- **HMP is the whole player.** It builds a playbin with those sinks, feeds
+  the `HS_Esplayer*` hardware injector itself, and takes a URL. The order
+  the browser uses for URL playback:
+  1. `HMPInit`.
+  2. `HMPCreate(&{id, appType 3, dataType 3, kind 32}, &h)`. Kind 32 is
+     the URL player; 16 is MSE.
+  3. `HMPRegisterCallback(h, fn(h, event, extra))`.
+  4. `HMPSetURI(h, struct)`: 12 words, passed by value, with the URL
+     probably at word 4.
+  5. `HMPPrepare`, which is asynchronous.
+  6. `HMPSetSubtitleShowState(h, 0)`.
+  7. `HMPSetDisplayRect(h, rect, rect, 0)`: 5 ints each, order unknown.
+  8. `HMPSetComponentMuteState(h, 2, 0)`: probably "unmute video".
+  9. `HMPStart`. It blocks until the decoders are open, so it runs on its
+     own thread.
+
+  After that: `HMPPause`, `HMPResume`, `HMPSeek(h, ms)`, `HMPGetPts`,
+  `HMPStop`, `HMPDestroy`. All return 0 on success.
+- **No source switch through tvmain was found.** The player libraries call
+  no `kilby` model action. They need `mi_daemon` and tvmain's HUI service,
+  which stay up, but not app_man, the browser, websdk or LauncherService.
+  At most two players can exist at once.
+- **Unsure until tried** (`vibe-play` has options for each):
+  - the URI word (`--uri-word`);
+  - the rectangle's layout (`--rect`);
+  - the event numbers: `vibe-play` prints each one raw;
+  - the units of `HMPGetPts`. Until they are known, `vibe-play` reports
+    its own clock.
+
 ## Unknowns and next tests (need the owner and the screen)
 
 - Can our process start a pipeline into `videoessink` and get a picture?
@@ -112,3 +159,33 @@ export GST_PLUGIN_PATH=/opt/mmlib/gstreamer-1.0 GST_REGISTRY=/tmp/gstreg.bin
 - Does the DirectFB OSD stay on top of the video plane? (It does for HDMI
   now.)
 - Audio over ARC to the soundbar, and AV sync with `render-delay`.
+
+## Morning test plan (owner at the TV, volume low)
+
+1. Deploy (`TV_HOST=192.168.2.152 native/deploy.sh`), then
+   `sh /var/local/vibe/restart-ui.sh`. Nothing of the Jellyfin code runs
+   until the card is opened.
+2. Home, then the **Jellyfin** card (after the inputs). Pick a server.
+   Approve the code in the Jellyfin app on the phone (Quick Connect).
+3. Browse: Continue watching, Next up, Libraries, a series, a season, an
+   episode, then the detail screen.
+4. First playback, from SSH, so the UI is out of the way:
+
+   ```sh
+   cd /var/local/vibe
+   export LD_LIBRARY_PATH=/usr/local/lib/:/lib:/basic/lib
+   # the panel's sign-in (step 2); these commands only read the file
+   export JF_STATE=/var/local/vibe/state/jellyfin
+   ./vibe-jf resume                  # or: views, ls ID, nextup; pick an id
+   ./vibe-jf play ID                 # prints the method and the URL
+   G=229,233,301,305,401,711,712,713,714,715,901,916,1022,3010,3013,3015,3016,3018
+   (echo "open URL"; sleep 30; echo pause; sleep 5; echo resume; sleep 10; echo stop)      | ./vibe-play --user=311:311:$G; cat /tmp/vibe-play.log
+   ```
+
+   Watch for a picture, sound on the soundbar, `event N` lines and the
+   `pos` lines. If nothing shows, try `--uri-word=0` and other
+   `--rect=` orders.
+5. Then from the panel: Play, OK (pause), LEFT/RIGHT (seek), BACK (stop),
+   and check that the resume point shows on the phone.
+6. Recovery: `kill -9` vibe-play mid-film, then switch to an HDMI input
+   and check the picture comes back.

@@ -38,6 +38,7 @@ Ways back (all over SSH, each documented in 06-native-route.md):
 | --- | --- |
 | `touch /var/local/vibe/off` (or `/var/local/vibe-off`) | `vibe-ui` not started at the next boot |
 | `touch /var/local/vibe/debloat.off` | nothing stopped, no Hisense block, from the next boot (the running script lifts the block within 60 s) |
+| `touch /var/local/vibe/jf.off` | no Jellyfin card on Home, from the next vibe-ui start (nothing of the Jellyfin code runs until the card is opened) |
 | `touch /var/local/vibe-stock` | at the next boot, `boot.sh` restores the original runtime file (md5-checked) and starts nothing; the stock UI is back from the boot after |
 | `HOOK_STEP=revert sh /var/local/vibe/hook-patch.sh` | takes our block out of the hook |
 
