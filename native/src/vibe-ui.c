@@ -43,6 +43,7 @@
 #include "common.h"
 #include "gam.h"
 #include "gfx.h"
+#include "jfui.h"
 
 #define FONT_REG  "/opt/font/Cobalt_fonts/Roboto-Regular.ttf"
 #define FONT_BOLD "/opt/font/Cobalt_fonts/Roboto-Bold.ttf"
@@ -56,7 +57,7 @@ static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 /* SIGUSR1: write the next frame (our layer only) to /tmp/vibe-shot.raw */
 static void on_usr1(int sig) { (void)sig; shot_flag = 1; }
 
-enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_INPUTS, S_RENAME_NAME, S_KEYBOARD };
+enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_INPUTS, S_RENAME_NAME, S_KEYBOARD, S_JELLYFIN };
 
 static const char *const picture_modes[] = {
      "Dynamic", "Standard", "Cinema Night", "Cinema Day", "Game", "Sport", "Calibrated"
@@ -239,6 +240,7 @@ struct app {
      double toast_until, vol_until;
      double next_inputs, next_vol, next_pic;
      int  dirty;
+     int  jf_avail;              /* the Jellyfin card on Home (jf.off absent) */
      int  gam;
      const char *gam_name;
 };
@@ -464,12 +466,20 @@ static void draw_home(struct app *a, cv_t *c)
           text_v(a, a->f_tiny, HOME_X, 600, 30, K_TEXT3, "SETTINGS", -1);
      }
 
+     /* the inputs, then Jellyfin; narrower cards if they would not fit */
+     int ncards = a->nvis + a->jf_avail, cw = CARD_W;
+     if (ncards > 0 && HOME_X + ncards * (CARD_W + CARD_GAP) - CARD_GAP > a->W - HOME_X)
+          cw = (a->W - 2 * HOME_X - (ncards - 1) * CARD_GAP) / ncards;
      for (int k = 0; k < a->nvis; k++) {
           struct biz_input *in = &a->in[a->vis[k]];
-          home_card(a, c, HOME_X + k * (CARD_W + CARD_GAP), 336, a->row == 0 && a->col == k,
-                    input_label(a, a->vis[k]), in->signal ? "Signal" : "No signal",
-                    in->signal, !strcmp(in->id, a->cur));
+          home_card_w(a, c, HOME_X + k * (cw + CARD_GAP), 336, cw, a->row == 0 && a->col == k,
+                      input_label(a, a->vis[k]), in->signal ? "Signal" : "No signal",
+                      in->signal, !strcmp(in->id, a->cur));
      }
+     if (a->jf_avail)
+          home_card_w(a, c, HOME_X + a->nvis * (cw + CARD_GAP), 336, cw,
+                      a->row == 0 && a->col == a->nvis, "Jellyfin", "Movies and shows", -1,
+                      0);
      for (int k = 0; k < N_SETTINGS; k++)
           home_card_w(a, c, HOME_X + k * (SET_CARD_W + SET_CARD_GAP), 646, SET_CARD_W,
                       a->row == 1 && a->col == k,
@@ -835,6 +845,7 @@ static void draw_screens(struct app *a, cv_t *c, double now)
           break;
      }
      case S_KEYBOARD:     draw_keyboard(a, c); break;
+     case S_JELLYFIN:     jfui_draw(c, now); break;
      case S_NONE:         break;
      }
      if (a->nosig_shown && a->screen == S_NONE)
@@ -1322,6 +1333,8 @@ static void sleep_tick(struct app *a, double now)
           a->sleep_deadline = 0;
           a->sleep_kind = 0;
           a->sleep_warned = 0;
+          if (a->screen == S_JELLYFIN)
+               jfui_close(now);                   /* reports the position */
           a->screen = S_NONE;
           a->toast_until = 0;
           a->dirty = 1;
@@ -1378,14 +1391,45 @@ static void list_move(struct app *a, int n, int d)
      }
 }
 
+/* ---- Jellyfin (jfui.c): vibe-ui's drawing helpers, lent to the panel */
+static void jf_text(void *ctx, IDirectFBFont *f, int x, int box_y, int box_h,
+                    uint32_t colour, const char *str, int align)
+{
+     text_v(ctx, f, x, box_y, box_h, colour, str, align);
+}
+static void jf_hints(void *ctx, cv_t *c, int cx, int y, const char *const *pairs, int n)
+{
+     hints(ctx, c, cx, y, pairs, n);
+}
+static void jf_sheet(void *ctx, cv_t *c, int x, int y, int w, int h, const char *title)
+{
+     sheet(ctx, c, x, y, w, h, title);
+}
+
+static void open_jellyfin(struct app *a, double now)
+{
+     struct jfui_host h = {
+          a->s, a->f_title, a->f_head, a->f_item, a->f_bold, a->f_small, a->f_tiny,
+          a->W, a->H, a, jf_text, focus_fill, jf_hints, jf_sheet
+     };
+     a->screen = S_JELLYFIN;
+     a->dirty = 1;
+     jfui_open(&h, now);
+}
+
 static void key_home(struct app *a, int k, double now)
 {
-     int ncol = a->row == 0 ? a->nvis : N_SETTINGS;
+     int ncol = a->row == 0 ? a->nvis + a->jf_avail : N_SETTINGS;
      switch (k) {
      case DIKS_CURSOR_LEFT:  if (a->col > 0) { a->col--; mark_focus(a); } break;
      case DIKS_CURSOR_RIGHT: if (a->col + 1 < ncol) { a->col++; mark_focus(a); } break;
      case DIKS_CURSOR_UP:
-          if (a->row > 0) { a->row = 0; if (a->col >= a->nvis) a->col = a->nvis > 0 ? a->nvis - 1 : 0; mark_focus(a); }
+          if (a->row > 0) {
+               int n0 = a->nvis + a->jf_avail;
+               a->row = 0;
+               if (a->col >= n0) a->col = n0 > 0 ? n0 - 1 : 0;
+               mark_focus(a);
+          }
           break;
      case DIKS_CURSOR_DOWN:
           if (a->row < 1) { a->row = 1; if (a->col >= N_SETTINGS) a->col = N_SETTINGS - 1; mark_focus(a); }
@@ -1395,6 +1439,8 @@ static void key_home(struct app *a, int k, double now)
                switch_to(a, a->vis[a->col], now);
                a->screen = S_NONE;
                a->dirty = 1;
+          } else if (a->row == 0 && a->jf_avail && a->col == a->nvis) {
+               open_jellyfin(a, now);
           } else if (a->row == 1) {
                if (a->col < N_PAGES) {
                     a->page = a->col;
@@ -1793,6 +1839,14 @@ static void on_key(struct app *a, int k, int repeat, double now)
           return;
      }
      case DIKS_HOME:
+          if (a->screen == S_JELLYFIN) {
+               /* stops playback; Home opens on the Jellyfin card */
+               jfui_close(now);
+               open_screen(a, S_HOME, now);
+               a->row = 0;
+               a->col = a->nvis;
+               return;
+          }
           if (a->screen == S_NONE) {
                /* focus starts on the input being shown */
                open_screen(a, S_HOME, now);
@@ -1805,10 +1859,20 @@ static void on_key(struct app *a, int k, int repeat, double now)
           else { a->screen = S_NONE; a->dirty = 1; }
           return;
      case DIKS_MENU:
+          if (a->screen == S_JELLYFIN) {
+               if (jfui_playing())
+                    return;                       /* not over a film */
+               jfui_close(now);
+          }
           if (a->screen == S_SETTINGS) { a->screen = S_NONE; a->dirty = 1; }
           else { a->page = PAGE_PICTURE; a->val_known = 0; open_screen(a, S_SETTINGS, now); }
           return;
      case KEY_INPUT:
+          if (a->screen == S_JELLYFIN) {
+               if (jfui_playing())
+                    return;
+               jfui_close(now);
+          }
           if (a->screen != S_QUICK) { open_screen(a, S_QUICK, now); return; }
           break;
      }
@@ -1839,6 +1903,16 @@ static void on_key(struct app *a, int k, int repeat, double now)
      case S_INPUTS:
      case S_RENAME_NAME:  key_rename(a, k, repeat, now); break;
      case S_KEYBOARD:     key_keyboard(a, k, now); break;
+     case S_JELLYFIN:
+          if (!jfui_key(k, repeat, now)) {        /* BACK on its first screen */
+               jfui_close(now);
+               open_screen(a, S_HOME, now);
+               a->row = 0;
+               a->col = a->nvis;
+          } else if (jfui_tick(now)) {
+               a->dirty = 1;
+          }
+          break;
      case S_NONE:         break;
      }
 }
@@ -2006,6 +2080,7 @@ int main(int argc, char **argv)
      sigaction(SIGHUP, &sa, NULL);
      sa.sa_handler = on_usr1;
      sigaction(SIGUSR1, &sa, NULL);
+     signal(SIGPIPE, SIG_IGN);          /* the player child may die mid-write */
      if (timeout > 0)
           alarm((unsigned)timeout + 10);   /* default action kills us */
 
@@ -2024,6 +2099,7 @@ int main(int argc, char **argv)
           printf("gui.loop.finished was %d, set 1 -> r=%d\n", v, r);
      }
      load_hidden(a);                    /* before the first input list */
+     a->jf_avail = jfui_available();
      poll_inputs(a);
      a->bar_expected = read_bar_expected();
      printf("soundbar expected: %d (remembered)\n", a->bar_expected);
@@ -2151,11 +2227,14 @@ int main(int argc, char **argv)
                a->next_inputs = now + (a->screen != S_NONE || a->nosig_lost ? 1.0 : 3.0);
           }
           check_signal(a, now);
+          if (jfui_tick(now) && a->screen == S_JELLYFIN)
+               a->dirty = 1;
           /* no-signal standby: 14 min without signal on the current input,
            * then the last minute; a signal (or another input) ends it */
-          if (a->sleep_kind == OFF_NOSIG && !a->nosig_lost)
+          /* (a Jellyfin film plays over an input with no signal) */
+          if (a->sleep_kind == OFF_NOSIG && (!a->nosig_lost || jfui_playing()))
                sleep_cancel(a, "signal back", now, 0);
-          else if (a->nosig_standby && a->nosig_lost && !a->sleep_deadline &&
+          else if (a->nosig_standby && a->nosig_lost && !a->sleep_deadline && !jfui_playing() &&
                    now - a->nosig_since >= NOSIG_STANDBY_S)
                nosig_arm(a, now);
           /* an action row's "OK again" ran out: draw it plain again */

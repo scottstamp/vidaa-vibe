@@ -1,0 +1,1249 @@
+/*
+ * The Jellyfin panel (see jfui.h). Text-only lists for now: posters come
+ * later (stb_image is vendored for that).
+ *
+ * Screens: SERVERS (pick one of the discovered servers) -> SIGNIN (Quick
+ * Connect code) -> HOME (continue watching, next up, libraries) -> LIST
+ * (a library, folder, series or season; a stack) -> DETAIL (play, resume,
+ * from the start, mark played) -> PLAYER (full-screen video, OSD on keys).
+ */
+#define _GNU_SOURCE
+#include "jfui.h"
+#include "jf.h"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#define STATE_DEFAULT "/var/local/vibe/state/jellyfin"
+/* $JF_STATE overrides (tests run as root must not write the UI's state) */
+#define STATE_FILE (getenv("JF_STATE") ? getenv("JF_STATE") : STATE_DEFAULT)
+#define SWITCH_OFF "/var/local/vibe/jf.off"
+#define PLAYER_BIN "/var/local/vibe/vibe-play"
+
+/* palette: as vibe-ui.c */
+#define K_TEXT      0xfff0f3fa
+#define K_TEXT2     0xff98a1b4
+#define K_TEXT3     0xff6b7488
+#define K_CARD      0xeb1c2130
+#define K_PANEL_EDGE 0x26ffffff
+#define K_ACCENT_L  0xff4f7cff
+#define K_ACCENT_R  0xff8a5cff
+#define K_TRACK     0x38ffffff
+
+#define TICKS_PER_MS 10000LL
+
+/* ------------------------------------------------------------ the worker */
+
+enum job_kind {
+     JB_DISCOVER, JB_CONNECT, JB_QC_START, JB_QC_POLL, JB_HOME, JB_LIST,
+     JB_DETAIL, JB_PLAYINFO, JB_REPORT, JB_PLAYED, JB_LOGOUT, JB_STOP_TC
+};
+enum list_kind { LK_CHILDREN, LK_SEASONS, LK_EPISODES };
+
+struct job {
+     enum job_kind kind;
+     int  gen;                 /* browse jobs: results of older gens dropped */
+     char id[JF_ID], id2[JF_ID];
+     char arg[256];
+     int  start, lkind;
+     int64_t ticks;
+     int  event, paused, flag;
+     struct jf_play *play;     /* JB_REPORT / JB_STOP_TC: a copy, freed by worker */
+};
+
+struct result {
+     enum job_kind kind;
+     int  gen, rc;
+     char err[160];
+     struct jf_server servers[8];
+     int  nservers;
+     char code[16], secret[128];
+     struct jf_list lists[3];
+     struct jf_item item;
+     struct jf_play *play;
+     char server_name[64], user_name[64];
+     int  start;
+};
+
+#define QMAX 32
+static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  q_cond = PTHREAD_COND_INITIALIZER;
+static struct job      jobs[QMAX];
+static int             jq_head, jq_n;
+static struct result  *results[QMAX];
+static int             rq_head, rq_n;
+static int             wake_fd = -1;          /* unused; the main loop polls */
+static int             worker_up;
+
+static struct jf_session S;                   /* the worker's */
+
+static void post(struct job j)
+{
+     pthread_mutex_lock(&q_lock);
+     if (jq_n < QMAX) {
+          jobs[(jq_head + jq_n) % QMAX] = j;
+          jq_n++;
+          pthread_cond_signal(&q_cond);
+     } else if (j.play) {
+          free(j.play);
+     }
+     pthread_mutex_unlock(&q_lock);
+}
+
+static void deliver(struct result *r)
+{
+     pthread_mutex_lock(&q_lock);
+     if (rq_n < QMAX) {
+          results[(rq_head + rq_n) % QMAX] = r;
+          rq_n++;
+          r = NULL;
+     }
+     pthread_mutex_unlock(&q_lock);
+     if (r) {               /* queue full: drop */
+          for (int i = 0; i < 3; i++) jf_list_free(&r->lists[i]);
+          free(r->item.overview);
+          free(r->play);
+          free(r);
+     }
+}
+
+static void *worker(void *arg)
+{
+     (void)arg;
+     for (;;) {
+          pthread_mutex_lock(&q_lock);
+          while (!jq_n) pthread_cond_wait(&q_cond, &q_lock);
+          struct job j = jobs[jq_head];
+          jq_head = (jq_head + 1) % QMAX;
+          jq_n--;
+          pthread_mutex_unlock(&q_lock);
+
+          struct result *r = calloc(1, sizeof *r);
+          if (!r) { free(j.play); continue; }
+          r->kind = j.kind;
+          r->gen = j.gen;
+          r->start = j.start;
+          switch (j.kind) {
+          case JB_DISCOVER:
+               r->nservers = jf_discover(r->servers, 8, 2500);
+               r->rc = 0;
+               break;
+          case JB_CONNECT: {
+               struct jf_session t = S;
+               snprintf(t.server, sizeof t.server, "%s", j.arg);
+               r->rc = jf_public_info(&t);
+               if (r->rc == 0) {
+                    if (strcmp(t.server_id, S.server_id) != 0)
+                         t.token[0] = t.user_id[0] = t.user_name[0] = 0;
+                    S = t;
+                    jf_session_save(&S, STATE_FILE);
+               }
+               break;
+          }
+          case JB_QC_START:
+               r->rc = jf_qc_enabled(&S) ? jf_qc_initiate(&S, r->code, r->secret) : -1;
+               if (r->rc && !jf_error()[0]) snprintf(r->err, sizeof r->err, "Quick Connect is off on this server");
+               break;
+          case JB_QC_POLL: {
+               int p = jf_qc_poll(&S, j.arg);
+               if (p == 1) {
+                    r->rc = jf_qc_finish(&S, j.arg);
+                    if (r->rc == 0) jf_session_save(&S, STATE_FILE);
+                    r->start = 1;           /* signed in */
+               } else {
+                    r->rc = p < 0 ? -1 : 0;
+                    r->start = 0;
+               }
+               break;
+          }
+          case JB_HOME:
+               r->rc = jf_views(&S, &r->lists[2]);
+               if (r->rc == 0) {
+                    jf_resume(&S, 12, &r->lists[0]);     /* optional rows */
+                    jf_next_up(&S, 12, &r->lists[1]);
+               }
+               break;
+          case JB_LIST:
+               if (j.lkind == LK_SEASONS) r->rc = jf_seasons(&S, j.id, &r->lists[0]);
+               else if (j.lkind == LK_EPISODES) r->rc = jf_episodes(&S, j.id, j.id2, &r->lists[0]);
+               else r->rc = jf_children(&S, j.id, j.start, 100, &r->lists[0]);
+               break;
+          case JB_DETAIL:
+               r->rc = jf_item(&S, j.id, &r->item);
+               break;
+          case JB_PLAYINFO:
+               r->play = calloc(1, sizeof *r->play);
+               r->rc = r->play ? jf_playback(&S, j.id, j.ticks, -1, JF_SUB_DEFAULT, r->play) : -1;
+               break;
+          case JB_REPORT:
+               r->rc = jf_report(&S, j.id, j.play, j.event, j.ticks, j.paused);
+               break;
+          case JB_STOP_TC:
+               jf_stop_transcode(&S, j.play);
+               r->rc = 0;
+               break;
+          case JB_PLAYED:
+               r->rc = jf_set_played(&S, j.id, j.flag);
+               break;
+          case JB_LOGOUT:
+               jf_logout(&S);
+               jf_session_save(&S, STATE_FILE);
+               r->rc = 0;
+               break;
+          }
+          if (r->rc != 0 && !r->err[0]) snprintf(r->err, sizeof r->err, "%s", jf_error());
+          snprintf(r->server_name, sizeof r->server_name, "%s", S.server_name);
+          snprintf(r->user_name, sizeof r->user_name, "%s", S.user_name);
+          free(j.play);
+          deliver(r);
+     }
+     return NULL;
+}
+
+/* ------------------------------------------------------------- UI state */
+
+enum scr { J_SERVERS, J_SIGNIN, J_HOME, J_LIST, J_DETAIL, J_PLAYER };
+
+struct row {                   /* a line of a list screen */
+     int  header;              /* a section title, not selectable */
+     const char *title;
+     struct jf_item *it;       /* NULL for headers and fixed rows */
+     int  action;              /* DETAIL: what OK does */
+};
+
+#define MAX_ROWS 512
+#define MAX_DEPTH 6
+
+struct level {                 /* one LIST screen */
+     struct jf_list l;
+     enum list_kind lkind;
+     char id[JF_ID], id2[JF_ID];
+     char title[128];
+     int  sel, top;
+     int  loading_more;
+};
+
+enum { A_PLAY, A_RESUME, A_RESTART, A_PLAYED, A_UNPLAYED, A_OPEN };
+
+static struct {
+     int  on, inited;
+     struct jfui_host h;
+     enum scr scr;
+     int  gen;
+     int  busy;
+     char busy_msg[64];
+     char err[160];
+     double err_until;
+     char server_name[64], user_name[64];
+     int  have_server, signed_in;
+
+     struct jf_server servers[8];
+     int  nservers;
+
+     char qc_code[16], qc_secret[128];
+     double qc_next, qc_until;
+
+     struct jf_list home[3];     /* resume, next up, views */
+     struct level lv[MAX_DEPTH];
+     int  depth;                 /* LIST screens open */
+
+     struct jf_item detail;
+     int  have_detail;
+
+     struct row rows[MAX_ROWS];  /* the current screen's rows */
+     int  nrows, sel, top;
+     int  home_sel;              /* kept across trips into lists */
+
+     /* playback */
+     pid_t pid;
+     int  to_fd, from_fd;
+     char rbuf[2048];
+     int  rlen;
+     struct jf_play *play;
+     struct jf_item playing;     /* what is playing (copy, no overview) */
+     enum scr detail_back;       /* where BACK from the detail goes */
+     enum scr play_back;         /* where the end of playback goes */
+     int  pstate;                /* 0 opening, 1 playing, 2 paused, 3 ended */
+     double pos_ms, dur_ms;
+     double osd_until, next_report, next_redraw;
+     double seek_target_ms, seek_at;   /* collapsed LEFT/RIGHT presses */
+     int  seek_pending;
+     int  reported_start;
+     int  dirty;
+} U;
+
+static void set_err(const char *msg, double now)
+{
+     snprintf(U.err, sizeof U.err, "%s", msg);
+     U.err_until = now + 6;
+     U.dirty = 1;
+     fprintf(stderr, "jellyfin: %s\n", msg);
+}
+
+static void busy(const char *msg)
+{
+     U.busy = 1;
+     snprintf(U.busy_msg, sizeof U.busy_msg, "%s", msg);
+     U.dirty = 1;
+}
+
+/* a browse job: anything older is now stale */
+static void post_browse(struct job j, const char *msg)
+{
+     j.gen = ++U.gen;
+     post(j);
+     busy(msg);
+}
+
+int jfui_available(void)
+{
+     return access(SWITCH_OFF, F_OK) != 0;
+}
+
+int jfui_playing(void)
+{
+     return U.on && U.scr == J_PLAYER;
+}
+
+/* ----------------------------------------------------------- row models */
+
+static void fmt_dur(int64_t ticks, char *out, size_t n)
+{
+     long m = (long)(ticks / 10000000 / 60);
+     if (m >= 60) snprintf(out, n, "%ldh %02ldm", m / 60, m % 60);
+     else snprintf(out, n, "%ld min", m);
+}
+
+static void fmt_clock(double ms, char *out, size_t n)
+{
+     long s = (long)(ms / 1000);
+     if (s < 0) s = 0;
+     if (s >= 3600) snprintf(out, n, "%ld:%02ld:%02ld", s / 3600, s / 60 % 60, s % 60);
+     else snprintf(out, n, "%ld:%02ld", s / 60, s % 60);
+}
+
+static void item_sub(const struct jf_item *it, char *out, size_t n)
+{
+     char d[32] = "";
+     out[0] = 0;
+     switch (it->type) {
+     case JF_VIEW:
+          snprintf(out, n, "%s", it->collection[0] ? it->collection : "Library");
+          break;
+     case JF_EPISODE:
+          if (it->season >= 0 && it->episode >= 0)
+               snprintf(out, n, "%s%sS%d E%d", it->series_name, it->series_name[0] ? "  \xc2\xb7  " : "",
+                        it->season, it->episode);
+          else snprintf(out, n, "%s", it->series_name);
+          break;
+     case JF_SERIES:
+          if (it->unplayed) snprintf(out, n, "%d%s%d unwatched", it->year, it->year ? "  \xc2\xb7  " : "", it->unplayed);
+          else if (it->year) snprintf(out, n, "%d", it->year);
+          break;
+     case JF_SEASON:
+          if (it->unplayed) snprintf(out, n, "%d unwatched", it->unplayed);
+          else if (it->played) snprintf(out, n, "Watched");
+          break;
+     case JF_FOLDER: case JF_BOXSET: case JF_PLAYLIST:
+          if (it->child_count) snprintf(out, n, "%d items", it->child_count);
+          break;
+     default:
+          if (it->runtime_ticks) fmt_dur(it->runtime_ticks, d, sizeof d);
+          if (it->year && d[0]) snprintf(out, n, "%d  \xc2\xb7  %s", it->year, d);
+          else if (it->year) snprintf(out, n, "%d", it->year);
+          else snprintf(out, n, "%s", d);
+          break;
+     }
+     if (it->position_ticks > 0 && it->runtime_ticks > 0) {
+          size_t l = strlen(out);
+          snprintf(out + l, n - l, "%s%d%% watched", l ? "  \xc2\xb7  " : "",
+                   (int)(it->position_ticks * 100 / it->runtime_ticks));
+     } else if (it->played && it->type != JF_SEASON && it->type != JF_SERIES) {
+          size_t l = strlen(out);
+          snprintf(out + l, n - l, "%sWatched", l ? "  \xc2\xb7  " : "");
+     }
+}
+
+static void add_row(int header, const char *title, struct jf_item *it, int action)
+{
+     if (U.nrows >= MAX_ROWS) return;
+     U.rows[U.nrows++] = (struct row){ header, title, it, action };
+}
+
+static int first_selectable(int from, int dir)
+{
+     for (int i = from; i >= 0 && i < U.nrows; i += dir)
+          if (!U.rows[i].header) return i;
+     return -1;
+}
+
+static void build_rows(void)
+{
+     U.nrows = 0;
+     switch (U.scr) {
+     case J_SERVERS:
+          for (int i = 0; i < U.nservers; i++) add_row(0, U.servers[i].name, NULL, i);
+          add_row(0, "Search again", NULL, -1);
+          break;
+     case J_SIGNIN:
+          add_row(0, "Use another server", NULL, 0);
+          break;
+     case J_HOME: {
+          static const char *const H[3] = { "Continue watching", "Next up", "Libraries" };
+          for (int s = 0; s < 3; s++) {
+               if (!U.home[s].n) continue;
+               add_row(1, H[s], NULL, 0);
+               for (int i = 0; i < U.home[s].n; i++)
+                    add_row(0, U.home[s].items[i].name, &U.home[s].items[i], A_OPEN);
+          }
+          add_row(1, "Account", NULL, 0);
+          add_row(0, "Sign out", NULL, -1);
+          break;
+     }
+     case J_LIST: {
+          struct level *L = &U.lv[U.depth - 1];
+          for (int i = 0; i < L->l.n; i++)
+               add_row(0, L->l.items[i].name, &L->l.items[i], A_OPEN);
+          break;
+     }
+     case J_DETAIL: {
+          struct jf_item *it = &U.detail;
+          int playable = it->type == JF_MOVIE || it->type == JF_EPISODE || it->type == JF_VIDEO ||
+                         it->type == JF_MUSICVIDEO;
+          if (playable && it->position_ticks > 0) {
+               add_row(0, "Resume", it, A_RESUME);
+               add_row(0, "Play from the start", it, A_RESTART);
+          } else if (playable) {
+               add_row(0, "Play", it, A_PLAY);
+          }
+          if (playable) add_row(0, it->played ? "Mark as unwatched" : "Mark as watched", it,
+                                it->played ? A_UNPLAYED : A_PLAYED);
+          break;
+     }
+     case J_PLAYER:
+          break;
+     }
+     if (U.sel >= U.nrows || U.sel < 0 || (U.nrows && U.rows[U.sel].header)) {
+          int s = first_selectable(U.sel < 0 ? 0 : U.sel, 1);
+          if (s < 0) s = first_selectable(U.nrows - 1, -1);
+          U.sel = s < 0 ? 0 : s;
+     }
+}
+
+static void go(enum scr s, int sel)
+{
+     U.scr = s;
+     U.sel = sel;
+     U.top = 0;
+     build_rows();
+     U.dirty = 1;
+}
+
+/* ------------------------------------------------------------ navigation */
+
+static void load_home(void)
+{
+     struct job j = { .kind = JB_HOME };
+     post_browse(j, "Loading\xe2\x80\xa6");
+}
+
+static void open_item(struct jf_item *it)
+{
+     if (U.depth >= MAX_DEPTH && (it->type == JF_VIEW || it->type == JF_FOLDER ||
+         it->type == JF_BOXSET || it->type == JF_SERIES || it->type == JF_SEASON ||
+         it->type == JF_PLAYLIST))
+          return;
+     struct job j = { .kind = JB_LIST };
+     struct level *L = &U.lv[U.depth];
+     memset(L, 0, sizeof *L);
+     snprintf(L->title, sizeof L->title, "%s", it->name);
+     switch (it->type) {
+     case JF_SERIES:
+          L->lkind = LK_SEASONS;
+          snprintf(L->id, sizeof L->id, "%s", it->id);
+          break;
+     case JF_SEASON:
+          L->lkind = LK_EPISODES;
+          snprintf(L->id, sizeof L->id, "%s", it->series_id);
+          snprintf(L->id2, sizeof L->id2, "%s", it->id);
+          if (it->series_name[0])
+               snprintf(L->title, sizeof L->title, "%s  \xc2\xb7  %s", it->series_name, it->name);
+          break;
+     case JF_VIEW: case JF_FOLDER: case JF_BOXSET: case JF_PLAYLIST: case JF_OTHER: case JF_ALBUM:
+          L->lkind = LK_CHILDREN;
+          snprintf(L->id, sizeof L->id, "%s", it->id);
+          break;
+     default: {
+          /* something playable: the detail screen */
+          struct job d = { .kind = JB_DETAIL };
+          snprintf(d.id, sizeof d.id, "%s", it->id);
+          post_browse(d, "Loading\xe2\x80\xa6");
+          return;
+     }
+     }
+     j.lkind = L->lkind;
+     snprintf(j.id, sizeof j.id, "%s", L->id);
+     snprintf(j.id2, sizeof j.id2, "%s", L->id2);
+     j.start = 0;
+     j.flag = 1;              /* a new level */
+     post_browse(j, "Loading\xe2\x80\xa6");
+}
+
+/* ------------------------------------------------------------- playback */
+
+static void player_send(const char *fmt, ...)
+{
+     if (U.to_fd < 0) return;
+     char buf[4400];
+     va_list ap;
+     va_start(ap, fmt);
+     int n = vsnprintf(buf, sizeof buf - 1, fmt, ap);
+     va_end(ap);
+     if (n < 0) return;
+     if (n > (int)sizeof buf - 2) n = sizeof buf - 2;
+     buf[n++] = '\n';
+     if (write(U.to_fd, buf, (size_t)n) != n)
+          fprintf(stderr, "jellyfin: player write: %s\n", strerror(errno));
+}
+
+static void report(int event, double now)
+{
+     if (!U.play) return;
+     struct job j = { .kind = JB_REPORT, .event = event, .paused = U.pstate == 2 };
+     snprintf(j.id, sizeof j.id, "%s", U.playing.id);
+     j.ticks = (int64_t)(U.pos_ms * TICKS_PER_MS);
+     j.play = malloc(sizeof *j.play);
+     if (!j.play) return;
+     *j.play = *U.play;
+     post(j);
+     U.next_report = now + 10;
+}
+
+static int spawn_player(const char *url, int64_t start_ms)
+{
+     int in[2], out[2];
+     if (pipe2(in, O_CLOEXEC) != 0) return -1;
+     if (pipe2(out, O_CLOEXEC) != 0) { close(in[0]); close(in[1]); return -1; }
+     pid_t pid = fork();
+     if (pid < 0) {
+          close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+          return -1;
+     }
+     if (pid == 0) {
+          /* only async-signal-safe calls between fork and exec (threads) */
+          dup2(in[0], 0);
+          dup2(out[1], 1);
+          int devnull = open("/tmp/vibe-play.log", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+          if (devnull >= 0) dup2(devnull, 2);
+          /* no DirectFB or fusion descriptors in the child */
+          for (int fd = 3; fd < 1024; fd++) close(fd);
+          char *const argv[] = { (char *)"vibe-play", NULL };
+          execv(PLAYER_BIN, argv);
+          _exit(127);
+     }
+     close(in[0]);
+     close(out[1]);
+     U.pid = pid;
+     U.to_fd = in[1];
+     U.from_fd = out[0];
+     fcntl(U.from_fd, F_SETFL, fcntl(U.from_fd, F_GETFL) | O_NONBLOCK);
+     U.rlen = 0;
+     player_send("open %s %lld", url, (long long)start_ms);
+     return 0;
+}
+
+static void player_reap(void)
+{
+     if (U.to_fd >= 0) { close(U.to_fd); U.to_fd = -1; }
+     if (U.from_fd >= 0) { close(U.from_fd); U.from_fd = -1; }
+     if (U.pid > 0) {
+          /* it stops on stdin closing; give it a moment, then insist */
+          for (int i = 0; i < 30; i++) {
+               if (waitpid(U.pid, NULL, WNOHANG) == U.pid) { U.pid = 0; break; }
+               usleep(100000);
+          }
+          if (U.pid > 0) {
+               kill(U.pid, SIGKILL);
+               waitpid(U.pid, NULL, 0);
+               U.pid = 0;
+          }
+     }
+}
+
+static void stop_playback(double now, int ended)
+{
+     if (U.scr != J_PLAYER && !U.pid) return;
+     if (U.play) {
+          if (ended) U.pos_ms = U.dur_ms;
+          report(2, now);
+          struct job j = { .kind = JB_STOP_TC };
+          j.play = malloc(sizeof *j.play);
+          if (j.play) { *j.play = *U.play; post(j); }
+     }
+     player_send("stop");
+     player_reap();
+     free(U.play);
+     U.play = NULL;
+     U.scr = U.play_back;
+     build_rows();
+     U.dirty = 1;
+     /* the lists show progress: refresh what we came back to */
+     if (U.scr == J_HOME) load_home();
+     else if (U.scr == J_DETAIL && U.have_detail) {
+          struct job d = { .kind = JB_DETAIL };
+          snprintf(d.id, sizeof d.id, "%s", U.detail.id);
+          post_browse(d, "");
+          U.busy = 0;
+     }
+}
+
+static void start_playback(struct jf_item *it, int64_t start_ticks, double now)
+{
+     U.playing = *it;
+     U.playing.overview = NULL;
+     struct job j = { .kind = JB_PLAYINFO, .ticks = start_ticks };
+     snprintf(j.id, sizeof j.id, "%s", it->id);
+     post_browse(j, "Starting\xe2\x80\xa6");
+}
+
+static void on_player_line(char *l, double now)
+{
+     if (!strncmp(l, "state ", 6)) {
+          const char *s = l + 6;
+          if (!strcmp(s, "playing")) {
+               U.pstate = 1;
+               if (!U.reported_start) { U.reported_start = 1; report(0, now); }
+          } else if (!strcmp(s, "paused")) {
+               U.pstate = 2;
+               report(1, now);
+          }
+          U.dirty = 1;
+     } else if (!strncmp(l, "pos ", 4)) {
+          double p = atof(l + 4);
+          if (!U.seek_pending) U.pos_ms = p;
+          if (U.osd_until > now) U.dirty = 1;
+     } else if (!strncmp(l, "error ", 6)) {
+          set_err(l + 6, now);
+     } else if (!strcmp(l, "ended")) {
+          stop_playback(now, 1);
+     } else if (!strcmp(l, "exit")) {
+          /* the child ends on its own (failure or the end) */
+     }
+     fprintf(stderr, "vibe-play: %s\n", l);
+}
+
+static void read_player(double now)
+{
+     if (U.from_fd < 0) return;
+     for (;;) {
+          ssize_t n = read(U.from_fd, U.rbuf + U.rlen, sizeof U.rbuf - 1 - (size_t)U.rlen);
+          if (n == 0) {                    /* the child is gone */
+               if (U.scr == J_PLAYER) {
+                    if (U.pstate == 0) set_err("The player stopped before the video started", now);
+                    stop_playback(now, 0);
+               }
+               return;
+          }
+          if (n < 0) return;               /* EAGAIN */
+          U.rlen += (int)n;
+          U.rbuf[U.rlen] = 0;
+          char *nl;
+          while ((nl = strchr(U.rbuf, '\n'))) {
+               *nl = 0;
+               on_player_line(U.rbuf, now);
+               if (U.from_fd < 0) return;   /* stopped while handling */
+               int rest = U.rlen - (int)(nl + 1 - U.rbuf);
+               memmove(U.rbuf, nl + 1, (size_t)rest);
+               U.rlen = rest;
+               U.rbuf[U.rlen] = 0;
+          }
+          if (U.rlen >= (int)sizeof U.rbuf - 1) U.rlen = 0;   /* overlong line */
+     }
+}
+
+/* ---------------------------------------------------------------- open */
+
+void jfui_open(const struct jfui_host *h, double now)
+{
+     U.h = *h;
+     U.on = 1;
+     U.dirty = 1;
+     if (!U.inited) {
+          U.inited = 1;
+          U.to_fd = U.from_fd = -1;
+          jf_session_load(&S, STATE_FILE);
+          jf_session_init(&S);
+          snprintf(U.server_name, sizeof U.server_name, "%s", S.server_name);
+          snprintf(U.user_name, sizeof U.user_name, "%s", S.user_name);
+          U.have_server = S.server[0] != 0;
+          U.signed_in = S.token[0] != 0;
+          pthread_t t;
+          pthread_attr_t at;
+          pthread_attr_init(&at);
+          pthread_attr_setstacksize(&at, 256 * 1024);
+          if (pthread_create(&t, &at, worker, NULL) == 0) {
+               pthread_detach(t);
+               worker_up = 1;
+          }
+          pthread_attr_destroy(&at);
+          (void)wake_fd;
+     }
+     if (!worker_up) { set_err("could not start the network thread", now); return; }
+     if (U.signed_in) {
+          go(J_HOME, U.home_sel);
+          load_home();
+     } else if (U.have_server) {
+          go(J_SIGNIN, 0);
+          struct job j = { .kind = JB_QC_START };
+          post_browse(j, "Asking the server for a code\xe2\x80\xa6");
+     } else {
+          go(J_SERVERS, 0);
+          struct job j = { .kind = JB_DISCOVER };
+          post_browse(j, "Looking for Jellyfin servers\xe2\x80\xa6");
+     }
+}
+
+void jfui_close(double now)
+{
+     if (U.scr == J_PLAYER || U.pid) stop_playback(now, 0);
+     U.on = 0;
+     U.gen++;                 /* whatever is still loading is not wanted */
+     U.busy = 0;
+}
+
+/* ---------------------------------------------------------------- tick */
+
+static void apply(struct result *r, double now)
+{
+     int stale = r->gen && r->gen != U.gen;
+     snprintf(U.server_name, sizeof U.server_name, "%s", r->server_name);
+     snprintf(U.user_name, sizeof U.user_name, "%s", r->user_name);
+     if (r->kind == JB_REPORT || r->kind == JB_STOP_TC) {
+          if (r->rc) fprintf(stderr, "jellyfin: report: %s\n", r->err);
+          return;
+     }
+     if (stale) return;
+     U.busy = 0;
+     U.dirty = 1;
+     if (r->rc != 0 && r->kind != JB_QC_POLL) {
+          set_err(r->err[0] ? r->err : "request failed", now);
+          /* a dead token: back to sign-in */
+          if (strstr(r->err, "HTTP 401")) {
+               U.signed_in = 0;
+               go(J_SIGNIN, 0);
+               struct job j = { .kind = JB_QC_START };
+               post_browse(j, "Asking the server for a code\xe2\x80\xa6");
+          }
+          return;
+     }
+     switch (r->kind) {
+     case JB_DISCOVER:
+          U.nservers = r->nservers;
+          memcpy(U.servers, r->servers, sizeof U.servers);
+          if (!U.nservers) set_err("No Jellyfin server answered on this network", now);
+          go(J_SERVERS, 0);
+          break;
+     case JB_CONNECT: {
+          U.have_server = 1;
+          go(J_SIGNIN, 0);
+          struct job j = { .kind = JB_QC_START };
+          post_browse(j, "Asking the server for a code\xe2\x80\xa6");
+          break;
+     }
+     case JB_QC_START:
+          snprintf(U.qc_code, sizeof U.qc_code, "%s", r->code);
+          snprintf(U.qc_secret, sizeof U.qc_secret, "%s", r->secret);
+          U.qc_next = now + 3;
+          U.qc_until = now + 10 * 60;
+          go(J_SIGNIN, 0);
+          break;
+     case JB_QC_POLL:
+          if (r->rc != 0) {           /* expired or refused: a new code */
+               U.qc_code[0] = 0;
+               struct job j = { .kind = JB_QC_START };
+               post_browse(j, "Getting a new code\xe2\x80\xa6");
+          } else if (r->start == 1) {
+               U.signed_in = 1;
+               U.qc_code[0] = 0;
+               go(J_HOME, 0);
+               load_home();
+          } else {
+               U.qc_next = now + 3;
+          }
+          break;
+     case JB_HOME:
+          for (int s = 0; s < 3; s++) { jf_list_free(&U.home[s]); U.home[s] = r->lists[s]; r->lists[s] = (struct jf_list){ 0 }; }
+          if (U.scr == J_HOME) { int s = U.sel; go(J_HOME, s); }
+          break;
+     case JB_LIST: {
+          struct level *L;
+          if (r->start == 0 && (U.scr != J_LIST || !U.lv[U.depth - 1].loading_more)) {
+               /* a new level (or a reload of the top one) */
+               if (U.scr != J_LIST) U.home_sel = U.scr == J_HOME ? U.sel : U.home_sel;
+               else U.lv[U.depth - 1].sel = U.sel, U.lv[U.depth - 1].top = U.top;
+               L = &U.lv[U.depth];
+               jf_list_free(&L->l);
+               L->l = r->lists[0];
+               r->lists[0] = (struct jf_list){ 0 };
+               U.depth++;
+               go(J_LIST, 0);
+          } else {
+               /* the next page of the top level */
+               L = &U.lv[U.depth - 1];
+               L->loading_more = 0;
+               struct jf_list *m = &r->lists[0];
+               struct jf_item *n = realloc(L->l.items, (size_t)(L->l.n + m->n) * sizeof *n);
+               if (n) {
+                    memcpy(n + L->l.n, m->items, (size_t)m->n * sizeof *n);
+                    L->l.items = n;
+                    L->l.n += m->n;
+                    free(m->items);       /* overviews moved, not freed */
+                    *m = (struct jf_list){ 0 };
+               }
+               int s = U.sel, t = U.top;
+               build_rows();
+               U.sel = s; U.top = t;
+          }
+          break;
+     }
+     case JB_DETAIL:
+          free(U.detail.overview);
+          U.detail = r->item;
+          r->item.overview = NULL;
+          U.have_detail = 1;
+          if (U.scr != J_DETAIL) {
+               if (U.scr == J_LIST) { U.lv[U.depth - 1].sel = U.sel; U.lv[U.depth - 1].top = U.top; }
+               else if (U.scr == J_HOME) U.home_sel = U.sel;
+               U.detail_back = U.scr;
+               go(J_DETAIL, 0);
+          } else {
+               build_rows();
+          }
+          break;
+     case JB_PLAYINFO: {
+          free(U.play);
+          U.play = r->play;
+          r->play = NULL;
+          U.play_back = U.scr;
+          U.pstate = 0;
+          U.reported_start = 0;
+          U.pos_ms = 0;
+          U.seek_pending = 0;
+          U.dur_ms = (double)(U.play->runtime_ticks ? U.play->runtime_ticks : U.playing.runtime_ticks) / TICKS_PER_MS;
+          /* direct play starts at 0 and seeks; a transcode starts where asked */
+          int64_t start_ms = 0;
+          if (U.play->method != JF_TRANSCODE) start_ms = U.playing.position_ticks / TICKS_PER_MS;
+          if (r->start == 2) start_ms = 0;
+          if (spawn_player(U.play->url, start_ms) != 0) {
+               set_err("could not start the player", now);
+               free(U.play);
+               U.play = NULL;
+               break;
+          }
+          U.pos_ms = (double)start_ms;
+          U.scr = J_PLAYER;
+          U.osd_until = now + 5;
+          U.next_report = now + 10;
+          U.dirty = 1;
+          break;
+     }
+     case JB_PLAYED:
+          if (U.have_detail) {
+               struct job d = { .kind = JB_DETAIL };
+               snprintf(d.id, sizeof d.id, "%s", U.detail.id);
+               post_browse(d, "");
+          }
+          break;
+     case JB_LOGOUT:
+          U.signed_in = 0;
+          for (int s = 0; s < 3; s++) jf_list_free(&U.home[s]);
+          go(J_SERVERS, 0);
+          {
+               struct job j = { .kind = JB_DISCOVER };
+               post_browse(j, "Looking for Jellyfin servers\xe2\x80\xa6");
+          }
+          break;
+     default:
+          break;
+     }
+}
+
+int jfui_tick(double now)
+{
+     if (!U.inited) return 0;
+     for (;;) {
+          struct result *r = NULL;
+          pthread_mutex_lock(&q_lock);
+          if (rq_n) { r = results[rq_head]; rq_head = (rq_head + 1) % QMAX; rq_n--; }
+          pthread_mutex_unlock(&q_lock);
+          if (!r) break;
+          apply(r, now);
+          for (int i = 0; i < 3; i++) jf_list_free(&r->lists[i]);
+          free(r->item.overview);
+          free(r->play);
+          free(r);
+     }
+     read_player(now);
+     if (U.on && U.scr == J_SIGNIN && U.qc_code[0] && now >= U.qc_next && !U.busy) {
+          U.qc_next = now + 3;
+          struct job j = { .kind = JB_QC_POLL, .gen = U.gen };
+          snprintf(j.arg, sizeof j.arg, "%s", U.qc_secret);
+          post(j);
+     }
+     if (U.scr == J_PLAYER) {
+          if (U.seek_pending && now >= U.seek_at) {
+               U.seek_pending = 0;
+               player_send("seek %.0f", U.seek_target_ms);
+               U.pos_ms = U.seek_target_ms;
+               report(1, now);
+          }
+          if (U.pstate == 1 && now >= U.next_report) report(1, now);
+          /* the player does not say "ended" yet (its end-of-stream event
+           * number is unknown): its clock running past the end will do */
+          if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms + 3000) {
+               stop_playback(now, 1);
+               return U.on;
+          }
+          /* the OSD clock, and its disappearance */
+          if (U.osd_until && now >= U.osd_until) { U.osd_until = 0; U.dirty = 1; }
+          else if (U.osd_until > now && now >= U.next_redraw) { U.next_redraw = now + 1; U.dirty = 1; }
+     }
+     if (U.err_until && now >= U.err_until) { U.err_until = 0; U.dirty = 1; }
+     int d = U.dirty;
+     U.dirty = 0;
+     return d && U.on;
+}
+
+/* ---------------------------------------------------------------- keys */
+
+static void move(int d)
+{
+     int s = U.sel;
+     for (;;) {
+          s += d;
+          if (s < 0 || s >= U.nrows) return;
+          if (!U.rows[s].header) break;
+     }
+     U.sel = s;
+     U.dirty = 1;
+     /* near the end of a paged list: the next page */
+     if (U.scr == J_LIST) {
+          struct level *L = &U.lv[U.depth - 1];
+          if (L->lkind == LK_CHILDREN && !L->loading_more && L->l.n < L->l.total && U.sel >= L->l.n - 10) {
+               L->loading_more = 1;
+               struct job j = { .kind = JB_LIST, .lkind = LK_CHILDREN, .start = L->l.n };
+               snprintf(j.id, sizeof j.id, "%s", L->id);
+               j.gen = U.gen;           /* not a new browse: same gen */
+               post(j);
+          }
+     }
+}
+
+static int key_back(double now)
+{
+     switch (U.scr) {
+     case J_DETAIL:
+          U.scr = U.detail_back;
+          if (U.scr == J_LIST) { struct level *L = &U.lv[U.depth - 1]; go(J_LIST, L->sel); U.top = L->top; }
+          else go(J_HOME, U.home_sel);
+          return 1;
+     case J_LIST:
+          U.depth--;
+          jf_list_free(&U.lv[U.depth].l);
+          if (U.depth > 0) { struct level *L = &U.lv[U.depth - 1]; go(J_LIST, L->sel); U.top = L->top; }
+          else go(J_HOME, U.home_sel);
+          U.gen++;                   /* drop anything still loading */
+          U.busy = 0;
+          return 1;
+     default:
+          return 0;                  /* close the panel */
+     }
+}
+
+static void seek_by(double d_ms, double now)
+{
+     if (!U.seek_pending) U.seek_target_ms = U.pos_ms;
+     U.seek_target_ms += d_ms;
+     if (U.seek_target_ms < 0) U.seek_target_ms = 0;
+     if (U.dur_ms > 0 && U.seek_target_ms > U.dur_ms - 2000) U.seek_target_ms = U.dur_ms - 2000;
+     U.seek_pending = 1;
+     U.seek_at = now + 0.7;          /* presses in a row become one seek */
+     U.osd_until = now + 5;
+     U.dirty = 1;
+}
+
+static void key_player(int k, int repeat, double now)
+{
+     switch (k) {
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: case DIKS_PLAYPAUSE:
+     case DIKS_PAUSE: case DIKS_PLAY:
+          if (repeat) return;
+          if (U.pstate == 1 && k != DIKS_PLAY) player_send("pause");
+          else if (U.pstate == 2 && k != DIKS_PAUSE) player_send("resume");
+          U.osd_until = now + 5;
+          U.dirty = 1;
+          break;
+     case DIKS_CURSOR_LEFT: case DIKS_REWIND:
+          seek_by(repeat ? -30000 : -10000, now);
+          break;
+     case DIKS_CURSOR_RIGHT: case DIKS_FASTFORWARD:
+          seek_by(30000, now);
+          break;
+     case DIKS_CURSOR_UP: case DIKS_CURSOR_DOWN: case DIKS_INFO:
+          U.osd_until = U.osd_until > now ? 0 : now + 8;
+          U.dirty = 1;
+          break;
+     case DIKS_BACK: case DIKS_EXIT: case DIKS_STOP:
+          if (repeat) return;
+          stop_playback(now, 0);
+          break;
+     }
+}
+
+int jfui_key(int k, int repeat, double now)
+{
+     if (U.scr == J_PLAYER) { key_player(k, repeat, now); return 1; }
+     switch (k) {
+     case DIKS_CURSOR_UP:   move(-1); return 1;
+     case DIKS_CURSOR_DOWN: move(1); return 1;
+     case DIKS_PAGE_UP: case DIKS_CURSOR_LEFT:  for (int i = 0; i < 8; i++) move(-1); return 1;
+     case DIKS_PAGE_DOWN: case DIKS_CURSOR_RIGHT: for (int i = 0; i < 8; i++) move(1); return 1;
+     case DIKS_BACK: case DIKS_EXIT:
+          if (repeat) return 1;
+          return key_back(now);
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: case DIKS_PLAY: case DIKS_PLAYPAUSE:
+          break;
+     default:
+          return 1;
+     }
+     if (repeat || U.busy || U.sel < 0 || U.sel >= U.nrows) return 1;
+     struct row *r = &U.rows[U.sel];
+     switch (U.scr) {
+     case J_SERVERS:
+          if (r->action < 0) {
+               struct job j = { .kind = JB_DISCOVER };
+               post_browse(j, "Looking for Jellyfin servers\xe2\x80\xa6");
+          } else {
+               struct job j = { .kind = JB_CONNECT };
+               snprintf(j.arg, sizeof j.arg, "%s", U.servers[r->action].address);
+               post_browse(j, "Connecting\xe2\x80\xa6");
+          }
+          break;
+     case J_SIGNIN: {
+          U.qc_code[0] = 0;
+          go(J_SERVERS, 0);
+          struct job j = { .kind = JB_DISCOVER };
+          post_browse(j, "Looking for Jellyfin servers\xe2\x80\xa6");
+          break;
+     }
+     case J_HOME:
+          if (r->action < 0) {
+               struct job j = { .kind = JB_LOGOUT };
+               post_browse(j, "Signing out\xe2\x80\xa6");
+          } else if (r->it) {
+               U.home_sel = U.sel;
+               /* episodes and movies from the top rows play from the detail */
+               open_item(r->it);
+          }
+          break;
+     case J_LIST:
+          if (r->it) open_item(r->it);
+          break;
+     case J_DETAIL:
+          switch (r->action) {
+          case A_PLAY: start_playback(r->it, 0, now); break;
+          case A_RESUME: start_playback(r->it, r->it->position_ticks, now); break;
+          case A_RESTART: {
+               struct jf_item t = *r->it;
+               t.position_ticks = 0;
+               start_playback(&t, 0, now);
+               break;
+          }
+          case A_PLAYED: case A_UNPLAYED: {
+               struct job j = { .kind = JB_PLAYED, .flag = r->action == A_PLAYED };
+               snprintf(j.id, sizeof j.id, "%s", r->it->id);
+               post_browse(j, "");
+               U.busy = 0;
+               break;
+          }
+          }
+          break;
+     case J_PLAYER:
+          break;
+     }
+     return 1;
+}
+
+/* ------------------------------------------------------------- drawing */
+
+#define P_X   120
+#define P_TOP 220
+#define ROW_H 84
+#define ROW_W 1100
+
+static void text(IDirectFBFont *f, int x, int y, int h, uint32_t col, const char *s, int align)
+{
+     U.h.text(U.h.ctx, f, x, y, h, col, s, align);
+}
+
+static void draw_rows(struct canvas *c, int y0, int y1)
+{
+     int vis = (y1 - y0) / ROW_H;
+     if (vis < 1) vis = 1;
+     if (U.sel < U.top) U.top = U.sel;
+     if (U.sel >= U.top + vis) U.top = U.sel - vis + 1;
+     /* keep a section header with its first row */
+     if (U.top > 0 && U.rows[U.top - 1].header && U.sel == U.top) U.top--;
+     char sub[160];
+     for (int i = U.top; i < U.nrows && i < U.top + vis; i++) {
+          struct row *r = &U.rows[i];
+          int y = y0 + (i - U.top) * ROW_H;
+          if (r->header) {
+               if (!c) text(U.h.f_tiny, P_X, y + 36, 40, K_TEXT3, r->title, -1);
+               continue;
+          }
+          int foc = i == U.sel;
+          if (c) {
+               if (foc) U.h.focus(c, P_X - 24, y + 6, ROW_W, ROW_H - 12, 20);
+          } else {
+               sub[0] = 0;
+               if (r->it && U.scr != J_DETAIL) item_sub(r->it, sub, sizeof sub);
+               text(sub[0] ? U.h.f_bold : U.h.f_item, P_X, y + 6, sub[0] ? 44 : ROW_H - 12,
+                    K_TEXT, r->title, -1);
+               if (sub[0])
+                    text(U.h.f_small, P_X, y + 44, 34, foc ? 0xe6ffffff : K_TEXT2, sub, -1);
+          }
+     }
+     if (U.nrows > vis && !c) {
+          char pos[32];
+          snprintf(pos, sizeof pos, "%d / %d", U.sel + 1, U.nrows);
+          text(U.h.f_tiny, P_X + ROW_W - 40, y1 + 8, 30, K_TEXT3, pos, 1);
+     }
+}
+
+static void draw_player(struct canvas *c, double now)
+{
+     /* nothing but the OSD: the video is on the plane below */
+     if (!(U.osd_until > now || U.pstate != 1 || U.seek_pending)) return;
+     int W = U.h.W, H = U.h.H;
+     int bx = 120, bw = W - 240, by = H - 200;
+     double pos = U.seek_pending ? U.seek_target_ms : U.pos_ms;
+     if (c) {
+          gfx_rrect(c, 60, H - 300, W - 120, 240, 32, 0xc0101420);
+          gfx_rrect(c, bx, by, bw, 10, 5, K_TRACK);
+          if (U.dur_ms > 0) {
+               int w = (int)(bw * (pos / U.dur_ms));
+               if (w > bw) w = bw;
+               if (w > 10) gfx_rrect_hgrad(c, bx, by, w, 10, 5, K_ACCENT_L, K_ACCENT_R);
+          }
+     } else {
+          char t[200], a[32], b[32];
+          if (U.playing.type == JF_EPISODE && U.playing.series_name[0])
+               snprintf(t, sizeof t, "%s  \xc2\xb7  S%d E%d  %s", U.playing.series_name,
+                        U.playing.season, U.playing.episode, U.playing.name);
+          else snprintf(t, sizeof t, "%s", U.playing.name);
+          text(U.h.f_head, bx, H - 280, 60, K_TEXT, t, -1);
+          const char *st = U.pstate == 0 ? "Starting\xe2\x80\xa6" : U.pstate == 2 ? "Paused" :
+                           U.seek_pending ? "Seeking" : "";
+          if (st[0]) text(U.h.f_small, W - 120, H - 280, 60, K_TEXT2, st, 1);
+          fmt_clock(pos, a, sizeof a);
+          fmt_clock(U.dur_ms, b, sizeof b);
+          text(U.h.f_small, bx, by + 20, 40, K_TEXT2, a, -1);
+          text(U.h.f_small, bx + bw, by + 20, 40, K_TEXT2, b, 1);
+          static const char *const h[] = { "OK", "Pause", "\xe2\x97\x80 \xe2\x96\xb6", "Seek", "BACK", "Stop" };
+          U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 3);
+     }
+     if (c) {
+          static const char *const h[] = { "OK", "Pause", "\xe2\x97\x80 \xe2\x96\xb6", "Seek", "BACK", "Stop" };
+          U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 3);
+     }
+}
+
+void jfui_draw(struct canvas *c, double now)
+{
+     if (!U.on) return;
+     int W = U.h.W, H = U.h.H;
+     if (U.scr == J_PLAYER) {
+          draw_player(c, now);
+          if (U.err_until > now && !c) text(U.h.f_item, W / 2, 80, 60, 0xffff8080, U.err, 0);
+          return;
+     }
+     if (c) gfx_fill_vgradient_full(c, 0xf005070c, 0xfa05070c);
+     const char *title = "Jellyfin";
+     char tbuf[160];
+     switch (U.scr) {
+     case J_SERVERS: title = "Choose a Jellyfin server"; break;
+     case J_SIGNIN:  title = "Sign in to Jellyfin"; break;
+     case J_HOME:    title = "Jellyfin"; break;
+     case J_LIST:    title = U.lv[U.depth - 1].title; break;
+     case J_DETAIL:  title = U.detail.name; break;
+     default: break;
+     }
+     if (!c) {
+          text(U.h.f_title, P_X, 80, 80, K_TEXT, title, -1);
+          if (U.server_name[0]) {
+               snprintf(tbuf, sizeof tbuf, "%s%s%s", U.server_name, U.user_name[0] ? "  \xc2\xb7  " : "",
+                        U.user_name);
+               text(U.h.f_small, W - P_X, 80, 80, K_TEXT2, tbuf, 1);
+          }
+     }
+     int y0 = P_TOP, y1 = H - 160;
+     if (U.scr == J_SIGNIN) {
+          if (!c) {
+               if (U.qc_code[0]) {
+                    text(U.h.f_item, P_X, 230, 50, K_TEXT2,
+                         "In another Jellyfin app, open Quick Connect and enter:", -1);
+                    char spaced[32] = "";
+                    for (int i = 0; U.qc_code[i] && i < 12; i++) {
+                         size_t l = strlen(spaced);
+                         snprintf(spaced + l, sizeof spaced - l, "%c%s", U.qc_code[i], U.qc_code[i + 1] ? " " : "");
+                    }
+                    text(U.h.f_title, P_X, 300, 160, K_TEXT, spaced, -1);
+                    text(U.h.f_small, P_X, 470, 40, K_TEXT3,
+                         "(Settings \xe2\x80\xba Quick Connect, while signed in)", -1);
+               }
+          } else if (U.qc_code[0]) {
+               gfx_rrect(c, P_X - 30, 290, 640, 180, 28, K_CARD);
+               gfx_rrect_outline(c, P_X - 30, 290, 640, 180, 28, 1, K_PANEL_EDGE);
+          }
+          y0 = 560;
+     } else if (U.scr == J_DETAIL) {
+          if (!c) {
+               char sub[160];
+               item_sub(&U.detail, sub, sizeof sub);
+               text(U.h.f_item, P_X, 170, 50, K_TEXT2, sub, -1);
+               if (U.detail.overview) {
+                    /* wrap the overview into up to 5 lines of ~95 chars */
+                    const char *p = U.detail.overview;
+                    for (int line = 0; line < 5 && *p; line++) {
+                         char buf[128];
+                         int n = (int)strlen(p), cut = n;
+                         if (n > 95) {
+                              cut = 95;
+                              while (cut > 40 && p[cut] != ' ') cut--;
+                         }
+                         snprintf(buf, sizeof buf, "%.*s%s", cut, p, line == 4 && cut < n ? "\xe2\x80\xa6" : "");
+                         text(U.h.f_small, P_X, 230 + line * 44, 44, K_TEXT2, buf, -1);
+                         p += cut;
+                         while (*p == ' ') p++;
+                    }
+               }
+          }
+          y0 = 480;
+     }
+     draw_rows(c, y0, y1);
+     if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W - P_X, H - 150, 50, K_TEXT2, U.busy_msg, 1);
+     if (!c && U.err_until > now) text(U.h.f_item, P_X, H - 150, 50, 0xffff8080, U.err, -1);
+     static const char *const hs[] = { "ARROWS", "Move", "OK", "Select", "BACK", "Back" };
+     U.h.hints(U.h.ctx, c, W / 2, H - 96, hs, 3);
+}
