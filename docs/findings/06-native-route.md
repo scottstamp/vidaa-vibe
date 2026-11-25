@@ -748,6 +748,16 @@ Known side effect, not yet observed: the TV's clock may come from
 `time-bas.vidaahub.com`; with it blocked, the clock may drift or be unset.
 Nothing in vibe-ui shows the time, and the sleep timer counts minutes.
 
+### app_man in the key path?
+
+Test (2026-11-25): `app_man` (pid 724) frozen with SIGSTOP for 20 s
+(uptime 98.6–118.6 s) while the owner pressed HOME, UP, DOWN and BACK.
+Every key reached `vibe-ui` and the menu reacted normally (owner). So keys go
+from `systemserver` through DirectFB to the focused window without `app_man`,
+despite its `input_event_source = inject` setting. Not yet tested without
+`app_man`: standby and wake, and what a kill does to its children
+(`hisenseUI`, `apmbond`, `LauncherService`, `websdk`).
+
 ### Way back (written before the change)
 
 - Everything is in memory. A reboot without `debloat.sh` brings every
