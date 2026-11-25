@@ -19,7 +19,8 @@ HDMI inputs only: no live TV, none of the built-in apps.
    starts `/var/local/vibe/boot.sh` (`native/tv/hook-patch.sh` adds or
    removes the block).
 2. `boot.sh` starts `debloat.sh`, waits for the stock engine, then runs
-   `vibe-ui` and restarts it if it exits (10 tries).
+   `vibe-ui` and restarts it whenever it exits (backing off up to 60 s;
+   the previous run's log is kept as `last-vibe-ui.prev.log`).
 3. The stock engine boots from slot B, a blank transparent page
    (`runFlag` 1 in `/var/local/appUpgrade/appRunTimeInfoFile.json`), so it
    draws nothing.
@@ -115,7 +116,9 @@ Ways back (all over SSH, each documented in 06-native-route.md):
 - Files that the browser bridge created (`/var/local/otaTest.sh`,
   `/var/local/alvidaa-db.*`) are owned by `UhisWebsdk`. Rewrite them in place
   with `cat new > file`; replacing them makes them root-owned and breaks the
-  bridge's no-op button, which is the disarm of last resort.
+  bridge's no-op button. (With vibe-ui in charge the browser and `websdk`
+  are stopped, so that button is out of reach; it matters again only if the
+  stock UI comes back.)
 - Write anything with backslashes or quotes to a file first (or edit with a
   tool): heredocs and `sed` replacement strings have broken C strings here
   more than once.

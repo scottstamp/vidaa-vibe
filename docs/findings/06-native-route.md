@@ -463,7 +463,9 @@ fi
 ```
 
 `native/tv/boot.sh` waits for `hisenseUI` (so the DirectFB world exists),
-then runs `vibe-ui` with no timeout and restarts it up to 10 times. Switches
+then runs `vibe-ui` with no timeout and restarts it up to 10 times (since
+2026-11-25: forever, backing off 3 s, 6 s, … up to 60 s, reset after a run of
+10 minutes; the previous run's log is kept as `last-vibe-ui.prev.log`). Switches
 it checks:
 
 | File | Effect | Who can create it |

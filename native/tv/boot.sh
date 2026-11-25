@@ -72,15 +72,27 @@ if [ ! -f /tmp/vibe-ui.started ]; then
     : > /tmp/vibe-ui.started
 fi
 
+# Never give up: without vibe-ui there is no UI at all (POWER and volume
+# still work, they are the system's). Back off 3, 6, 9 ... s, at most 60 s;
+# a run that lasted 10 minutes counts as healthy and resets the back-off.
+# The previous run's log is kept as last-vibe-ui.prev.log (a crash's log
+# would otherwise be overwritten by the restart).
 n=0
-while [ $n -lt 10 ]; do
+runs=0
+while :; do
     off && { echo "off switch seen, stopping"; exit 0; }
     n=$((n+1))
-    echo "start vibe-ui (run $n) at uptime $(up)"
+    runs=$((runs+1))
+    [ -f $V/last-vibe-ui.log ] && mv -f $V/last-vibe-ui.log $V/last-vibe-ui.prev.log
+    t0=$(up); t0=${t0%.*}
+    echo "start vibe-ui (run $runs) at uptime $(up)"
     ARGS=$(cat $V/ui.args 2>/dev/null)
     echo "  args: $ARGS"
     VIBE_BIN=vibe-ui $V/vibe-run.sh --timeout=0 $ARGS >/dev/null 2>&1
-    echo "vibe-ui exited rc=$? at uptime $(up)"
-    sleep $((n * 3))
+    rc=$?
+    t1=$(up); t1=${t1%.*}
+    echo "vibe-ui exited rc=$rc at uptime $(up)"
+    [ $((t1 - t0)) -ge 600 ] && n=1
+    d=$((n * 3)); [ $d -gt 60 ] && d=60
+    sleep $d
 done
-echo "gave up after $n runs"

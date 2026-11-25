@@ -55,13 +55,16 @@ app_upgrade ota_upgrade hi_logreport_se resmon
 run_aiservice.s vidaa_ai_servic ai_manager
 remoteservice remoteapp_biz_c mosquitto
 dialserver dlna_service mdnsd
-mdharvester masman reggieserver"
+mdharvester masman reggieserver
+websdk"
 
 # The stock UI's own pieces: the app manager, the engine relauncher, the
 # (blank) engine, the stock home screen's service. Neither keys nor standby
 # and wake need them (tested with app_man frozen, then all four killed).
 # Stopped only once vibe-ui runs, app_man first: it restarts some services.
-# Nothing restarts them. websdk stays: the browser bridge's disarm.
+# Nothing restarts them. (websdk, the browser file bridge, is in STOP: the
+# browser it served is stopped too, so the bridge's disarm button is already
+# out of reach; SSH and the switches in /var/local are the ways back.)
 STOP_UI="app_man apmbond hisenseUI LauncherService"
 UI_DONE=0
 
