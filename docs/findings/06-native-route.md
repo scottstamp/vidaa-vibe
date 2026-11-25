@@ -691,6 +691,13 @@ right.
   partly unmeasured. Fills were made more opaque (cards 0xeb, panels 0xf5,
   Home scrim 0xc0→0xf2).
 
+## To revisit: unused remote buttons
+
+The shortcut button next to MENU, MTS, CC, the mic button, the dash key and
+the app buttons (Netflix and others) all reach `vibe-ui` (logged as
+`key 0x…`) and do nothing. The owner will decide what they should do
+through use (2026-11-25); nothing is assigned until then.
+
 ## Drawing speed
 
 The keyboard felt slow (owner). Measured with `VIBE_TIMING=1`: 400 ms a
