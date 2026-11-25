@@ -619,6 +619,26 @@ Registering with `app_man` (GAM, `native/src/gam.c`, `vibe-ui --gam` and
   the DirectFB window, POWER through the system, and the app shortcut keys
   do nothing (owner).
 
+## Drawing the UI
+
+2026-11-25. DirectFB here fills only hard-edged rectangles. `vibe-ui` locks
+its window surface (`DSLF_WRITE`), draws shapes in software (`gfx.c`:
+anti-aliased rounded rectangles, gradients, glows; ARGB not premultiplied),
+unlocks, then draws text with DirectFB. Labels are centred with the font's
+ascender and descender. The owner saw the result on the panel; it looks
+right.
+
+- A full redraw (Home: full-screen scrim, six cards, glow) takes 160–180 ms
+  on this CPU (first frame about 490 ms). Fine for key-driven redraws, too
+  slow for animation.
+- Reading the window surface back for a screenshot: `Lock(DSLF_READ)`
+  returned a buffer of zeros (not even DirectFB's own text);
+  `Lock(DSLF_READ | DSLF_WRITE)` returned the drawn frame.
+- The panel shows translucent fills lighter than their alpha suggests (in
+  a photo the desktop showed through 0xc8 cards strongly), partly camera and
+  partly unmeasured. Fills were made more opaque (cards 0xeb, panels 0xf5,
+  Home scrim 0xc0→0xf2).
+
 ## Way back
 
 `vibe` and `vibe-model` change nothing persistent themselves. Their only

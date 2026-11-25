@@ -51,6 +51,7 @@ and was not observed.
 | `busybox tee` is not an applet here | Hit | Redirect to a file, then `cat` it |
 | BACK and some unnamed keys arrive twice: the second copy comes from the IR device (15) with `key_code` −1 | Hit | Drop a repeat with code −1 |
 | Volume and mute keys act on the TV even while our window has focus (and receives them too), **but only because the stock UI does it**. With the stock UI blanked (slot B), nothing changes the volume | Hit | Our app sets `kilby.sl2.i32.sound.main.volume` / `.mute` itself |
+| `Lock(DSLF_READ)` on the window surface returns zeros | Hit | Read back with `DSLF_READ | DSLF_WRITE` |
 | Rewriting a running shell script in place (`cat > boot.sh`) can make bash execute garbage, because it reads the file as it runs | Avoided | `native/deploy.sh` writes `X.new` and renames it over `X` |
 | A shared log file for every tool (`last.log`) let a tool run truncate the running UI's log (NUL bytes in it afterwards) | Hit | One log per binary: `last-<binary>.log` |
 | `tail`, `tr`, `uniq` are missing too; piping a script into a missing command killed the script with SIGPIPE before it did anything | Hit | Use `$BB tail`; avoid pipes into unverified commands |

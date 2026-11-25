@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <directfb.h>
@@ -41,6 +42,7 @@
 #include "biz.h"
 #include "common.h"
 #include "gam.h"
+#include "gfx.h"
 
 #define FONT_REG  "/opt/font/Cobalt_fonts/Roboto-Regular.ttf"
 #define FONT_BOLD "/opt/font/Cobalt_fonts/Roboto-Bold.ttf"
@@ -48,18 +50,11 @@
 /* remote keys without a DirectFB name (vibe keys, 2026-11-25) */
 #define KEY_INPUT  0xf068
 
-/* colours (ARGB) */
-#define C_SCRIM    0xd80b0f18
-#define C_PANEL    0xf0101622
-#define C_CARD     0xff1d2a40
-#define C_FOCUS    0xff2a6fdb
-#define C_TEXT     0xffffffff
-#define C_DIM      0xffa0a8b8
-#define C_GOOD     0xff9ff0b0
-#define C_TRACK    0xff3a4458
 
-static volatile sig_atomic_t stop_flag;
+static volatile sig_atomic_t stop_flag, shot_flag;
 static void on_signal(int sig) { (void)sig; stop_flag = 1; }
+/* SIGUSR1: write the next frame (our layer only) to /tmp/vibe-shot.raw */
+static void on_usr1(int sig) { (void)sig; shot_flag = 1; }
 
 enum screen { S_NONE, S_HOME, S_QUICK, S_PICTURE, S_RENAME_INPUT, S_RENAME_NAME };
 
@@ -92,7 +87,7 @@ struct app {
      IDirectFBWindow       *win;
      IDirectFBSurface      *s;
      IDirectFBEventBuffer  *events;
-     IDirectFBFont         *f_title, *f_item, *f_bold, *f_small;
+     IDirectFBFont         *f_title, *f_head, *f_item, *f_bold, *f_small, *f_tiny;
      int W, H;
 
      /* model state */
@@ -128,20 +123,37 @@ struct app {
      } while (0)
 
 /* ------------------------------------------------------------- drawing */
+/*
+ * Each frame is drawn in two passes over the same layout code:
+ *   pass SHAPES: the window surface is locked and shapes are rendered in
+ *                software (gfx.c: anti-aliased rounded rects, gradients,
+ *                glows) - DirectFB here only fills hard-edged rectangles;
+ *   pass TEXT:   after Unlock, text through DirectFB (FreeType glyphs).
+ * Layout functions take the canvas: non-NULL = shapes, NULL = text.
+ */
 
-static void fill(struct app *a, int x, int y, int w, int h, u32 argb)
-{
-     a->s->SetDrawingFlags(a->s, DSDRAW_NOFX);
-     a->s->SetColor(a->s, argb >> 16 & 0xff, argb >> 8 & 0xff, argb & 0xff, argb >> 24);
-     a->s->FillRectangle(a->s, x, y, w, h);
-}
+/* palette (ARGB, not premultiplied) */
+#define K_TEXT      0xfff0f3fa
+#define K_TEXT2     0xff98a1b4
+#define K_TEXT3     0xff6b7488
+#define K_PANEL     0xf50f121a
+#define K_PANEL_EDGE 0x26ffffff
+#define K_CARD      0xeb1c2130
+#define K_CARD_HI   0x24ffffff
+#define K_ACCENT_L  0xff4f7cff
+#define K_ACCENT_R  0xff8a5cff
+#define K_GLOW      0xa06470ff
+#define K_GOOD      0xff3ddc97
+#define K_OFF       0xff5a6275
+#define K_TRACK     0x38ffffff
+#define K_KEYCAP    0x30ffffff
 
-static void text(struct app *a, IDirectFBFont *f, int x, int y, u32 argb,
-                 const char *str, DFBSurfaceTextFlags flags)
+typedef struct canvas cv_t;
+
+static void set_font_colour(struct app *a, IDirectFBFont *f, u32 c)
 {
      a->s->SetFont(a->s, f);
-     a->s->SetColor(a->s, argb >> 16 & 0xff, argb >> 8 & 0xff, argb & 0xff, argb >> 24);
-     a->s->DrawString(a->s, str, -1, x, y, flags);
+     a->s->SetColor(a->s, c >> 16 & 0xff, c >> 8 & 0xff, c & 0xff, c >> 24);
 }
 
 static int text_width(IDirectFBFont *f, const char *str)
@@ -151,11 +163,21 @@ static int text_width(IDirectFBFont *f, const char *str)
      return w;
 }
 
-static void bar(struct app *a, int x, int y, int w, int v)
+/*
+ * Text vertically centred in the box [box_y, box_y + box_h): the baseline
+ * sits half the ink height (ascender + descender, descender negative)
+ * below the box's middle. align: -1 left at x, 0 centred on x, 1 right at x.
+ */
+static void text_v(struct app *a, IDirectFBFont *f, int x, int box_y, int box_h,
+                   u32 colour, const char *str, int align)
 {
-     v = v < 0 ? 0 : v > 100 ? 100 : v;
-     fill(a, x, y, w, 10, C_TRACK);
-     fill(a, x, y, w * v / 100, 10, C_FOCUS);
+     int asc = 0, desc = 0;
+     f->GetAscender(f, &asc);
+     f->GetDescender(f, &desc);
+     int base = box_y + box_h / 2 + (asc + desc) / 2;
+     DFBSurfaceTextFlags fl = align < 0 ? DSTF_LEFT : align > 0 ? DSTF_RIGHT : DSTF_CENTER;
+     set_font_colour(a, f, colour);
+     a->s->DrawString(a->s, str, -1, x, base, fl);
 }
 
 static const char *input_label(struct app *a, int i)
@@ -163,129 +185,274 @@ static const char *input_label(struct app *a, int i)
      return a->in[i].label[0] ? a->in[i].label : a->in[i].id;
 }
 
-static void draw_hint(struct app *a, int x, const char *hint)
+/* a sheet: big rounded panel with a hairline edge and a title */
+static void sheet(struct app *a, cv_t *c, int x, int y, int w, int h, const char *title)
 {
-     text(a, a->f_small, x, a->H - 90, C_DIM, hint, DSTF_TOPLEFT);
+     if (c) {
+          gfx_shadow(c, x, y, w, h, 36, 28, 0x90000000);
+          gfx_rrect(c, x, y, w, h, 36, K_PANEL);
+          gfx_rrect_outline(c, x, y, w, h, 36, 1, K_PANEL_EDGE);
+     } else {
+          text_v(a, a->f_title, x + 56, y + 44, 80, K_TEXT, title, -1);
+     }
 }
 
-/* Home: Inputs row, Settings row */
-#define CARD_W 320
-#define CARD_H 190
-#define CARD_GAP 32
-#define HOME_X 96
+/* the focus look: gradient pill with a soft glow */
+static void focus_fill(cv_t *c, int x, int y, int w, int h, int r)
+{
+     gfx_shadow(c, x, y, w, h, r, 22, K_GLOW);
+     gfx_rrect_hgrad(c, x, y, w, h, r, K_ACCENT_L, K_ACCENT_R);
+}
 
-static const char *const settings_cards[] = { "Picture", "Rename inputs" };
+static void dot(cv_t *c, int cx, int cy, int d, u32 colour)
+{
+     gfx_rrect(c, cx - d / 2, cy - d / 2, d, d, d / 2, colour);
+}
+
+/* "NOW" style pill badge; returns its width */
+static int badge(struct app *a, cv_t *c, int x_right, int y, const char *label, u32 bg, u32 fg)
+{
+     int w = text_width(a->f_tiny, label) + 28, h = 36;
+     if (c)
+          gfx_rrect(c, x_right - w, y, w, h, h / 2, bg);
+     else
+          text_v(a, a->f_tiny, x_right - w / 2, y, h, fg, label, 0);
+     return w;
+}
+
+/* key hints: [key] label pairs with key caps, centred on cx */
+static void hints(struct app *a, cv_t *c, int cx, int y, const char *const *pairs, int n)
+{
+     int total = 0, gap = 36, pad = 14, h = 40;
+     for (int i = 0; i < n; i++)
+          total += text_width(a->f_tiny, pairs[2 * i]) + 2 * pad + 12 +
+                   text_width(a->f_small, pairs[2 * i + 1]) + (i ? gap : 0);
+     int x = cx - total / 2;
+     for (int i = 0; i < n; i++) {
+          int kw = text_width(a->f_tiny, pairs[2 * i]) + 2 * pad;
+          if (i) x += gap;
+          if (c)
+               gfx_rrect(c, x, y, kw, h, 10, K_KEYCAP);
+          else
+               text_v(a, a->f_tiny, x + kw / 2, y, h, K_TEXT, pairs[2 * i], 0);
+          x += kw + 12;
+          if (!c)
+               text_v(a, a->f_small, x, y, h, K_TEXT2, pairs[2 * i + 1], -1);
+          x += text_width(a->f_small, pairs[2 * i + 1]);
+     }
+}
+
+/* ---- Home */
+#define HOME_X   120
+#define CARD_W   340
+#define CARD_H   200
+#define CARD_GAP 36
+#define CARD_R   28
+
+static const char *const settings_cards[][2] = {
+     { "Picture", "Mode, backlight, colour" },
+     { "Rename inputs", "Name your devices" },
+};
 #define N_SETTINGS 2
 
-static void card(struct app *a, int x, int y, int focus, const char *title,
-                 const char *sub, u32 sub_colour, const char *tag)
+static void home_card(struct app *a, cv_t *c, int x, int y, int focus, const char *title,
+                      const char *sub, int dot_state /* -1 none, 0 off, 1 on */, int now)
 {
-     fill(a, x, y, CARD_W, CARD_H, focus ? C_FOCUS : C_CARD);
-     text(a, a->f_bold, x + 28, y + 32, C_TEXT, title, DSTF_TOPLEFT);
-     if (sub)
-          text(a, a->f_small, x + 28, y + 100, sub_colour, sub, DSTF_TOPLEFT);
-     if (tag)
-          text(a, a->f_small, x + 28, y + 140, focus ? C_TEXT : C_DIM, tag, DSTF_TOPLEFT);
+     if (c) {
+          if (focus)
+               focus_fill(c, x, y, CARD_W, CARD_H, CARD_R);
+          else {
+               gfx_rrect(c, x, y, CARD_W, CARD_H, CARD_R, K_CARD);
+               gfx_rrect_outline(c, x, y, CARD_W, CARD_H, CARD_R, 1, K_PANEL_EDGE);
+          }
+          if (dot_state >= 0)
+               dot(c, x + 40, y + 52, 14, dot_state ? K_GOOD : (focus ? 0x90ffffff : K_OFF));
+     }
+     if (now)
+          badge(a, c, x + CARD_W - 24, y + 34, "NOW", focus ? 0x40ffffff : 0x333ddc97,
+                focus ? K_TEXT : K_GOOD);
+     if (!c) {
+          if (sub)
+               text_v(a, a->f_small, dot_state >= 0 ? x + 60 : x + 32, y + 34, 36,
+                      focus ? 0xe6ffffff : K_TEXT2, sub, -1);
+          text_v(a, a->f_bold, x + 32, y + CARD_H - 96, 64, K_TEXT, title, -1);
+     }
 }
 
-static void draw_home(struct app *a)
+static void draw_home(struct app *a, cv_t *c)
 {
-     char sub[96];
+     char buf[96];
      int ci = -1;
 
-     fill(a, 0, 0, a->W, a->H, C_SCRIM);
-     text(a, a->f_title, HOME_X, 72, C_TEXT, "Home", DSTF_TOPLEFT);
+     if (c)
+          gfx_fill_vgradient_full(c, 0xc005070c, 0xf205070c);
      for (int i = 0; i < a->nin; i++)
           if (!strcmp(a->in[i].id, a->cur))
                ci = i;
-     snprintf(sub, sizeof(sub), "Now showing: %s", ci >= 0 ? input_label(a, ci) : "-");
-     text(a, a->f_item, HOME_X, 160, C_DIM, sub, DSTF_TOPLEFT);
 
-     text(a, a->f_small, HOME_X, 250, C_DIM, "INPUTS", DSTF_TOPLEFT);
+     if (!c) {
+          time_t t = time(NULL);
+          struct tm tm;
+          localtime_r(&t, &tm);
+          text_v(a, a->f_title, HOME_X, 96, 80, K_TEXT, "Home", -1);
+          snprintf(buf, sizeof(buf), "Now showing  %s", ci >= 0 ? input_label(a, ci) : "-");
+          text_v(a, a->f_item, HOME_X, 176, 48, K_TEXT2, buf, -1);
+          strftime(buf, sizeof(buf), "%H:%M", &tm);
+          text_v(a, a->f_title, a->W - HOME_X, 96, 80, K_TEXT, buf, 1);
+          strftime(buf, sizeof(buf), "%A, %d %B", &tm);
+          text_v(a, a->f_small, a->W - HOME_X, 176, 48, K_TEXT2, buf, 1);
+          text_v(a, a->f_tiny, HOME_X, 290, 30, K_TEXT3, "INPUTS", -1);
+          text_v(a, a->f_tiny, HOME_X, 600, 30, K_TEXT3, "SETTINGS", -1);
+     }
+
      for (int k = 0; k < a->nvis; k++) {
           struct biz_input *in = &a->in[a->vis[k]];
-          int x = HOME_X + k * (CARD_W + CARD_GAP);
-          card(a, x, 300, a->row == 0 && a->col == k, input_label(a, a->vis[k]),
-               in->signal ? "signal" : "no signal", in->signal ? C_GOOD : C_DIM,
-               !strcmp(in->id, a->cur) ? "now showing" : NULL);
+          home_card(a, c, HOME_X + k * (CARD_W + CARD_GAP), 336, a->row == 0 && a->col == k,
+                    input_label(a, a->vis[k]), in->signal ? "Signal" : "No signal",
+                    in->signal, !strcmp(in->id, a->cur));
      }
+     for (int k = 0; k < N_SETTINGS; k++)
+          home_card(a, c, HOME_X + k * (CARD_W + CARD_GAP), 646, a->row == 1 && a->col == k,
+                    settings_cards[k][0], settings_cards[k][1], -1, 0);
 
-     text(a, a->f_small, HOME_X, 570, C_DIM, "SETTINGS", DSTF_TOPLEFT);
-     for (int k = 0; k < N_SETTINGS; k++) {
-          int x = HOME_X + k * (CARD_W + CARD_GAP);
-          card(a, x, 620, a->row == 1 && a->col == k, settings_cards[k], NULL, 0, NULL);
-     }
-     draw_hint(a, HOME_X, "Arrows  move        OK  select        BACK  close");
+     static const char *const h[] = { "ARROWS", "Navigate", "OK", "Select", "BACK", "Close" };
+     hints(a, c, a->W / 2, a->H - 96, h, 3);
 }
 
-/* right-hand panel used by Picture and Rename */
-#define PANEL_W 760
+/* ---- quick inputs: left sheet */
+#define Q_X 40
+#define Q_W 600
 
-static int panel_x(struct app *a) { return a->W - PANEL_W; }
-
-static void panel(struct app *a, const char *title)
+static void draw_quick(struct app *a, cv_t *c)
 {
-     int x = panel_x(a);
-     fill(a, x, 0, PANEL_W, a->H, C_PANEL);
-     fill(a, x - 4, 0, 4, a->H, C_FOCUS);
-     text(a, a->f_title, x + 64, 72, C_TEXT, title, DSTF_TOPLEFT);
+     int row_h = 104, rx = Q_X + 28, rw = Q_W - 56;
+     /* sheet sized to its content, centred vertically */
+     int h = 150 + a->nvis * (row_h + 12) + 130;
+     if (h > a->H - 80) h = a->H - 80;
+     int y0 = (a->H - h) / 2, top = y0 + 150;
+
+     sheet(a, c, Q_X, y0, Q_W, h, "Inputs");
+     for (int k = 0; k < a->nvis; k++) {
+          struct biz_input *in = &a->in[a->vis[k]];
+          int y = top + k * (row_h + 12), sel = k == a->sel, cur = !strcmp(in->id, a->cur);
+          if (c) {
+               if (sel)
+                    focus_fill(c, rx, y, rw, row_h, 24);
+               else if (cur)
+                    gfx_rrect(c, rx, y, rw, row_h, 24, K_CARD_HI);
+               dot(c, rx + 36, y + row_h / 2, 14, in->signal ? K_GOOD : (sel ? 0x90ffffff : K_OFF));
+          } else {
+               text_v(a, a->f_bold, rx + 64, y, row_h, K_TEXT, input_label(a, a->vis[k]), -1);
+          }
+          if (cur)
+               badge(a, c, rx + rw - 28, y + (row_h - 36) / 2, "NOW",
+                     sel ? 0x40ffffff : 0x333ddc97, sel ? K_TEXT : K_GOOD);
+          else if (!c && !in->signal)
+               text_v(a, a->f_small, rx + rw - 28, y, row_h, sel ? 0xe6ffffff : K_TEXT3, "No signal", 1);
+     }
+     static const char *const hh[] = { "OK", "Switch", "BACK", "Close" };
+     hints(a, c, Q_X + Q_W / 2, y0 + h - 76, hh, 2);
 }
 
-static void draw_picture(struct app *a)
-{
-     int x = panel_x(a) + 64, w = PANEL_W - 128, row_h = 118, top = 200;
+/* ---- right sheet: Picture, Rename */
+#define R_W 760
+static int r_x(struct app *a) { return a->W - 40 - R_W; }
 
-     panel(a, "Picture");
+static void slider(cv_t *c, int x, int y, int w, int v, int focus)
+{
+     v = v < 0 ? 0 : v > 100 ? 100 : v;
+     int fw = w * v / 100;
+     gfx_rrect(c, x, y, w, 8, 4, K_TRACK);
+     if (fw > 0)
+          gfx_rrect_hgrad(c, x, y, fw < 8 ? 8 : fw, 8, 4, K_ACCENT_L, K_ACCENT_R);
+     if (focus) {
+          gfx_shadow(c, x + fw - 13, y - 9, 26, 26, 13, 10, 0x80000000);
+          gfx_rrect(c, x + fw - 13, y - 9, 26, 26, 13, 0xffffffff);
+     }
+}
+
+static void draw_picture(struct app *a, cv_t *c)
+{
+     int x0 = r_x(a), y0 = 40, h = a->H - 80, rx = x0 + 28, rw = R_W - 56;
+     int top = y0 + 150, row_h = 118;
+
+     sheet(a, c, x0, y0, R_W, h, "Picture");
      for (int i = 0; i < N_PIC; i++) {
-          int y = top + i * row_h;
+          int y = top + i * (row_h + 8), sel = i == a->sel;
           char val[48];
-          if (i == a->sel)
-               fill(a, panel_x(a) + 32, y - 12, PANEL_W - 64, row_h - 12, C_CARD);
-          text(a, a->f_item, x, y, C_TEXT, pic_rows[i].name, DSTF_TOPLEFT);
-          if (!a->pic_known)
-               snprintf(val, sizeof(val), "...");
-          else if (i == 0)
-               snprintf(val, sizeof(val), "%s%s%s", i == a->sel ? "<  " : "",
-                        a->pic[0] >= 0 && a->pic[0] < N_MODES ? picture_modes[a->pic[0]] : "?",
-                        i == a->sel ? "  >" : "");
-          else
-               snprintf(val, sizeof(val), "%d", a->pic[i]);
-          text(a, a->f_item, x + w - text_width(a->f_item, val), y, i == a->sel ? C_TEXT : C_DIM,
-               val, DSTF_TOPLEFT);
-          if (i > 0 && a->pic_known)
-               bar(a, x, y + 66, w, a->pic[i]);
+          if (c && sel)
+               gfx_rrect(c, rx, y, rw, row_h, 24, K_CARD_HI);
+          if (i == 0) {
+               const char *m = a->pic_known && a->pic[0] >= 0 && a->pic[0] < N_MODES
+                               ? picture_modes[a->pic[0]] : "...";
+               int pw = 300, px = rx + rw - 28 - pw, ph = 56, py = y + (row_h - ph) / 2;
+               if (c) {
+                    if (sel) focus_fill(c, px, py, pw, ph, ph / 2);
+                    else gfx_rrect(c, px, py, pw, ph, ph / 2, K_CARD);
+               } else {
+                    text_v(a, a->f_item, rx + 32, y, row_h, K_TEXT, pic_rows[0].name, -1);
+                    text_v(a, a->f_bold, px + pw / 2, py, ph, K_TEXT, m, 0);
+                    if (sel) {
+                         text_v(a, a->f_bold, px + 26, py, ph, 0xccffffff, "<", 0);
+                         text_v(a, a->f_bold, px + pw - 26, py, ph, 0xccffffff, ">", 0);
+                    }
+               }
+               continue;
+          }
+          snprintf(val, sizeof(val), a->pic_known ? "%d" : "...", a->pic[i]);
+          if (c)
+               slider(c, rx + 32, y + 82, rw - 64, a->pic_known ? a->pic[i] : 0, sel);
+          else {
+               text_v(a, a->f_item, rx + 32, y + 12, 56, sel ? K_TEXT : K_TEXT2, pic_rows[i].name, -1);
+               text_v(a, a->f_bold, rx + rw - 32, y + 12, 56, K_TEXT, val, 1);
+          }
      }
-     draw_hint(a, panel_x(a) + 64, "UP / DOWN  choose     LEFT / RIGHT  change     BACK");
+     static const char *const hh[] = { "LEFT/RIGHT", "Adjust", "BACK", "Back" };
+     hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, 2);
 }
 
-/* generic scrolling list on the right panel */
-#define LIST_ROW_H 84
-#define LIST_TOP   200
-#define LIST_ROWS  9
+#define LIST_ROW_H 92
 
-static void draw_list(struct app *a, const char *title, int n,
+static void draw_list(struct app *a, cv_t *c, const char *title, int n,
                       const char *(*label)(struct app *, int), const char *(*sub)(struct app *, int))
 {
-     int x = panel_x(a) + 64;
+     int x0 = r_x(a), y0 = 40, h = a->H - 80, rx = x0 + 28, rw = R_W - 56, top = y0 + 150;
 
-     panel(a, title);
+     /* rows that fit between the title and the hints */
+     int rows = (h - 150 - 120) / (LIST_ROW_H + 10);
+     sheet(a, c, x0, y0, R_W, h, title);
      if (a->sel < a->top) a->top = a->sel;
-     if (a->sel >= a->top + LIST_ROWS) a->top = a->sel - LIST_ROWS + 1;
-     for (int i = a->top; i < n && i < a->top + LIST_ROWS; i++) {
-          int y = LIST_TOP + (i - a->top) * LIST_ROW_H;
-          const char *s2 = sub ? sub(a, i) : NULL;
-          if (i == a->sel)
-               fill(a, panel_x(a) + 32, y - 10, PANEL_W - 64, LIST_ROW_H - 8, C_FOCUS);
-          text(a, a->f_item, x, y, C_TEXT, label(a, i), DSTF_TOPLEFT);
-          if (s2)
-               text(a, a->f_small, x + PANEL_W - 128 - text_width(a->f_small, s2), y + 8,
-                    i == a->sel ? C_TEXT : C_DIM, s2, DSTF_TOPLEFT);
+     if (a->sel >= a->top + rows) a->top = a->sel - rows + 1;
+     if (c && n > rows) {
+          /* scroll indicator on the right edge */
+          int th = h - 150 - 120, bh = th * rows / n, by = top + th * a->top / n;
+          gfx_rrect(c, x0 + R_W - 14, top, 4, th, 2, K_TRACK);
+          gfx_rrect(c, x0 + R_W - 14, by, 4, bh, 2, 0xb0ffffff);
      }
-     draw_hint(a, x, "UP / DOWN  choose        OK  select        BACK");
+     for (int i = a->top; i < n && i < a->top + rows; i++) {
+          int y = top + (i - a->top) * (LIST_ROW_H + 10), sel = i == a->sel;
+          if (c) {
+               if (sel) focus_fill(c, rx, y, rw, LIST_ROW_H, 24);
+          } else {
+               const char *s2 = sub ? sub(a, i) : NULL;
+               text_v(a, a->f_bold, rx + 36, y, LIST_ROW_H, K_TEXT, label(a, i), -1);
+               if (s2)
+                    text_v(a, a->f_small, rx + rw - 36, y, LIST_ROW_H, sel ? 0xe6ffffff : K_TEXT3, s2, 1);
+          }
+     }
+     static const char *const hh[] = { "OK", "Select", "BACK", "Back" };
+     hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, 2);
 }
 
 static const char *rename_input_label(struct app *a, int i) { return input_label(a, a->vis[i]); }
 static const char *rename_input_sub(struct app *a, int i)   { return a->in[a->vis[i]].id; }
+
+static const char *preset_sub(struct app *a, int i)
+{
+     const char *cur = input_label(a, a->rename_idx);
+     const char *name = name_presets[i] ? name_presets[i] : a->in[a->rename_idx].id;
+     return !strcmp(cur, name) ? "Current" : NULL;
+}
 
 static const char *preset_label(struct app *a, int i)
 {
@@ -296,69 +463,95 @@ static const char *preset_label(struct app *a, int i)
      return buf;
 }
 
-static void draw_quick(struct app *a)
+/* ---- HUDs */
+static void draw_toast(struct app *a, cv_t *c)
 {
-     const int pw = 640, x0 = 64, row = 112, top = 220;
-
-     fill(a, 0, 0, pw, a->H, C_PANEL);
-     fill(a, pw, 0, 4, a->H, C_FOCUS);
-     text(a, a->f_title, x0, 72, C_TEXT, "Inputs", DSTF_TOPLEFT);
-     for (int k = 0; k < a->nvis; k++) {
-          struct biz_input *in = &a->in[a->vis[k]];
-          int y = top + k * row, cur = !strcmp(in->id, a->cur);
-          char sub[64];
-          if (k == a->sel)
-               fill(a, 32, y, pw - 64, row - 16, C_FOCUS);
-          else if (cur)
-               fill(a, 32, y, pw - 64, row - 16, C_CARD);
-          text(a, a->f_item, x0, y + 18, C_TEXT, input_label(a, a->vis[k]), DSTF_TOPLEFT);
-          snprintf(sub, sizeof(sub), "%s%s", in->signal ? "signal" : "no signal",
-                   cur ? "   \xc2\xb7   now showing" : "");
-          text(a, a->f_small, x0, y + 64, in->signal ? C_GOOD : C_DIM, sub, DSTF_TOPLEFT);
+     int w = text_width(a->f_bold, a->toast) + 120, h = 92, x = (a->W - w) / 2, y = 56;
+     if (c) {
+          gfx_shadow(c, x, y, w, h, h / 2, 24, 0x90000000);
+          gfx_rrect(c, x, y, w, h, h / 2, K_PANEL);
+          gfx_rrect_outline(c, x, y, w, h, h / 2, 1, K_PANEL_EDGE);
+          dot(c, x + 44, y + h / 2, 14, K_ACCENT_R);
+     } else {
+          text_v(a, a->f_bold, x + 72, y, h, K_TEXT, a->toast, -1);
      }
-     draw_hint(a, x0, "OK  switch        BACK  close");
 }
 
-static void draw_toast(struct app *a)
+static void draw_volume(struct app *a, cv_t *c)
 {
-     int w = 520, h = 120, x = 64, y = 64;
-     fill(a, x, y, w, h, 0xe0101622);
-     fill(a, x, y, 8, h, C_FOCUS);
-     text(a, a->f_title, x + 40, y + h / 2, C_TEXT, a->toast, DSTF_LEFT);
+     int w = 680, h = 104, x = (a->W - w) / 2, y = a->H - 200;
+     int v = a->vol < 0 ? 0 : a->vol > 100 ? 100 : a->vol;
+     int bx = x + 190, bw = w - 190 - 56;
+     if (c) {
+          gfx_shadow(c, x, y, w, h, h / 2, 24, 0x90000000);
+          gfx_rrect(c, x, y, w, h, h / 2, K_PANEL);
+          gfx_rrect_outline(c, x, y, w, h, h / 2, 1, K_PANEL_EDGE);
+          gfx_rrect(c, bx, y + h / 2 - 5, bw, 10, 5, K_TRACK);
+          if (!a->mute && v > 0)
+               gfx_rrect_hgrad(c, bx, y + h / 2 - 5, bw * v / 100 < 10 ? 10 : bw * v / 100, 10, 5,
+                               K_ACCENT_L, K_ACCENT_R);
+     } else {
+          char label[16];
+          snprintf(label, sizeof(label), a->mute ? "Muted" : "%d", a->vol);
+          text_v(a, a->f_tiny, x + 56, y + 14, 34, K_TEXT3, "VOLUME", -1);
+          text_v(a, a->mute ? a->f_item : a->f_head, x + 56, y + 40, 54, K_TEXT, label, -1);
+     }
 }
 
-static void draw_volume(struct app *a)
+static void draw_screens(struct app *a, cv_t *c, double now)
 {
-     int w = 760, h = 120, x = (a->W - w) / 2, y = a->H - 220;
-     char label[32];
-
-     fill(a, x, y, w, h, 0xe0101622);
-     snprintf(label, sizeof(label), a->mute ? "Muted" : "%d", a->vol);
-     text(a, a->f_title, x + 40, y + h / 2, C_TEXT, label, DSTF_LEFT);
-     fill(a, x + 220, y + h / 2 - 6, w - 260, 12, C_TRACK);
-     if (!a->mute) {
-          int v = a->vol < 0 ? 0 : a->vol > 100 ? 100 : a->vol;
-          fill(a, x + 220, y + h / 2 - 6, (w - 260) * v / 100, 12, C_FOCUS);
+     switch (a->screen) {
+     case S_HOME:         draw_home(a, c); break;
+     case S_QUICK:        draw_quick(a, c); break;
+     case S_PICTURE:      draw_picture(a, c); break;
+     case S_RENAME_INPUT: draw_list(a, c, "Rename inputs", a->nvis, rename_input_label, rename_input_sub); break;
+     case S_RENAME_NAME: {
+          char t[96];
+          snprintf(t, sizeof(t), "Rename %s", input_label(a, a->rename_idx));
+          draw_list(a, c, t, N_PRESETS, preset_label, preset_sub);
+          break;
      }
+     case S_NONE:         break;
+     }
+     if (now < a->toast_until)
+          draw_toast(a, c);
+     if (now < a->vol_until)
+          draw_volume(a, c);
 }
 
 static void redraw(struct app *a, double now)
 {
-     a->s->Clear(a->s, 0, 0, 0, 0);    /* transparent: the picture shows */
-     switch (a->screen) {
-     case S_HOME:         draw_home(a); break;
-     case S_QUICK:        draw_quick(a); break;
-     case S_PICTURE:      draw_picture(a); break;
-     case S_RENAME_INPUT: draw_list(a, "Rename inputs", a->nvis, rename_input_label, rename_input_sub); break;
-     case S_RENAME_NAME:  draw_list(a, input_label(a, a->rename_idx), N_PRESETS, preset_label, NULL); break;
-     case S_NONE:         break;
+     void *ptr = NULL;
+     int pitch = 0;
+     double t0 = vibe_now_s();
+
+     if (a->s->Lock(a->s, DSLF_WRITE, &ptr, &pitch) == DFB_OK && ptr) {
+          struct canvas c = { ptr, pitch / 4, a->W, a->H };
+          gfx_clear(&c);                        /* transparent: the picture shows */
+          draw_screens(a, &c, now);
+          a->s->Unlock(a->s);
+     } else {
+          a->s->Clear(a->s, 0, 0, 0, 0);
      }
-     if (now < a->toast_until)
-          draw_toast(a);
-     if (now < a->vol_until)
-          draw_volume(a);
+     a->s->SetDrawingFlags(a->s, DSDRAW_BLEND);
+     draw_screens(a, NULL, now);
+     if (shot_flag) {
+          /* raw dump: "W H\n" then W*H ARGB words, little endian */
+          FILE *f = fopen("/tmp/vibe-shot.raw", "wb");
+          if (f && a->s->Lock(a->s, DSLF_READ | DSLF_WRITE, &ptr, &pitch) == DFB_OK) {
+               fprintf(f, "%d %d\n", a->W, a->H);
+               for (int y = 0; y < a->H; y++)
+                    fwrite((char *)ptr + (size_t)y * pitch, 4, a->W, f);
+               a->s->Unlock(a->s);
+               printf("screenshot written\n");
+          }
+          if (f) fclose(f);
+          shot_flag = 0;
+     }
      a->s->Flip(a->s, NULL, DSFLIP_WAITFORSYNC);
      a->dirty = 0;
+     if (getenv("VIBE_TIMING"))
+          printf("frame %.0f ms\n", (vibe_now_s() - t0) * 1000);
 }
 
 /* --------------------------------------------------------------- model */
@@ -645,6 +838,44 @@ static void on_key(struct app *a, int k, int repeat, double now)
      }
 }
 
+/* ------------------------------------------------------------ dev hook */
+/*
+ * Development, only while the root-owned flag /var/local/vibe/dev exists
+ * (checked at start): lines in /tmp/vibe-cmd (created by root, mode 666) are
+ * executed and the file emptied:  "key 0xf005"  acts as that remote key,
+ * "shot" writes the next frame to /tmp/vibe-shot.raw.
+ */
+static void dev_commands(struct app *a, double now)
+{
+     static double next;
+     static int enabled = -1;
+     char line[128];
+     FILE *f;
+
+     if (enabled < 0) {
+          enabled = access("/var/local/vibe/dev", F_OK) == 0;
+          printf("dev hook %s\n", enabled ? "on" : "off");
+     }
+     if (!enabled || now < next)
+          return;
+     next = now + 0.3;
+     f = fopen("/tmp/vibe-cmd", "r+");
+     if (!f)
+          return;
+     while (fgets(line, sizeof(line), f)) {
+          unsigned k;
+          if (sscanf(line, "key %x", &k) == 1) {
+               printf("dev: key 0x%x\n", k);
+               on_key(a, (int)k, 0, now);
+          } else if (!strncmp(line, "shot", 4)) {
+               shot_flag = 1;
+          }
+     }
+     if (ftruncate(fileno(f), 0) != 0)
+          printf("dev: cannot empty /tmp/vibe-cmd\n");
+     fclose(f);
+}
+
 /* ---------------------------------------------------------------- GAM */
 
 static void gam_log(const char *tag, int type, const void *data, int len)
@@ -710,8 +941,9 @@ static int setup(struct app *a, int layer_id)
      CHECK("GetSurface", a->win->GetSurface(a->win, &a->s));
      CHECK("CreateEventBuffer", a->win->CreateEventBuffer(a->win, &a->events));
 
-     if (font(a, FONT_BOLD, 64, &a->f_title) || font(a, FONT_REG, 40, &a->f_item) ||
-         font(a, FONT_BOLD, 40, &a->f_bold) || font(a, FONT_REG, 28, &a->f_small))
+     if (font(a, FONT_BOLD, 60, &a->f_title) || font(a, FONT_BOLD, 48, &a->f_head) ||
+         font(a, FONT_REG, 34, &a->f_item) || font(a, FONT_BOLD, 38, &a->f_bold) ||
+         font(a, FONT_REG, 28, &a->f_small) || font(a, FONT_BOLD, 21, &a->f_tiny))
           return -1;
 
      a->s->Clear(a->s, 0, 0, 0, 0);
@@ -726,6 +958,8 @@ static int setup(struct app *a, int layer_id)
 static void teardown(struct app *a)
 {
      if (a->win) a->win->SetOpacity(a->win, 0);
+     if (a->f_tiny) a->f_tiny->Release(a->f_tiny);
+     if (a->f_head) a->f_head->Release(a->f_head);
      if (a->f_small) a->f_small->Release(a->f_small);
      if (a->f_bold) a->f_bold->Release(a->f_bold);
      if (a->f_item) a->f_item->Release(a->f_item);
@@ -765,6 +999,8 @@ int main(int argc, char **argv)
      sigaction(SIGTERM, &sa, NULL);
      sigaction(SIGINT, &sa, NULL);
      sigaction(SIGHUP, &sa, NULL);
+     sa.sa_handler = on_usr1;
+     sigaction(SIGUSR1, &sa, NULL);
      if (timeout > 0)
           alarm((unsigned)timeout + 10);   /* default action kills us */
 
@@ -867,6 +1103,9 @@ int main(int argc, char **argv)
                last_vol_end = a->vol_until;
                a->dirty = 1;
           }
+          dev_commands(a, now);
+          if (shot_flag)
+               a->dirty = 1;
           if (a->dirty)
                redraw(a, now);
      }
