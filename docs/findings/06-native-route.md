@@ -806,6 +806,31 @@ then VOL- about 20 times over 20 s with no effect, then the soundbar went
 reading). vibe-ui sends nothing to the soundbar in ARC mode, so this is the
 system's CEC path. Not seen on boots with debloat on.
 
+Why it takes 20 s: the syslog `/var/log/log.txt` (and `.1`, 512 KB each,
+`television` owner) has `tvmain`'s CEC trace with timestamps (`hscec.cpp`,
+threads `CecMonitor`, `EarcMonitor`, `CEC message thr`, `CEC ping thread`).
+On the boot of 2026-11-25 09:37 (debloat on):
+
+- 9.9 s `performStarting`, 10.2 s `setEArcSwitchValue(1)`, 11.0 s
+  "current mode is wait eARC established". The soundbar (logical address 5,
+  "Philips B4000", on HDMI1 = the ARC port) answers at once and from 16.4 s
+  sends `<Initiate ARC>` every ~0.6 s.
+- The TV queues every reply (`<Report ARC Initiated>` 0xc1, `<Set System
+  Audio Mode>`, …) in one send queue, but its send thread is suspended on
+  every HDMI hotplug ("HOTPLUG EVENT_Begin detected so suspend cec msg
+  thread"). `cecsetHotPlug` runs per input, staggered: port 1 at 13.6 s,
+  port 2 at 20.9 s, port 3 at 25.9 s, with suspend/resume bursts around
+  each. Sends ran at 0–1 per second against about 5 received; the queue
+  grew from 12 (13 s) to 138 (28 s).
+- 28.3 s, right after the last hotplug burst: `handleCECAudioDeviceNotify`
+  connect=1 active=1, `currentEARCStatus = 0`, ArcMode 2, ARC unmuted. eARC
+  never established; the link is plain ARC.
+
+So the delay is the staggered hotplug plus a CEC send queue flooded by the
+soundbar's retries, behind an eARC wait that this soundbar never satisfies.
+The queue also explains the owner's late, replayed volume presses. Next
+test: eARC off (`sound.earc.switch.value` 0, Sound → eARC in vibe-ui).
+
 ### Way back (written before the change)
 
 - Everything is in memory. A reboot without `debloat.sh` brings every
