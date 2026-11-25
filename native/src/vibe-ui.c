@@ -148,6 +148,14 @@ struct app {
      int  vis[BIZ_MAX_INPUTS], nvis;      /* indexes of inputs we show */
      char cur[32];
      int  vol, mute, vol_known;
+     int  vol_shown;               /* what the volume bar shows */
+     /* soundbar over ARC: the system forwards the remote's volume and mute
+      * keys to it over CEC itself, and the model's volume mirrors what the
+      * soundbar reports. Writing the volume there does nothing (the model
+      * echoes the value, the soundbar does not move), so we only follow. */
+     int  arc;                     /* output is ARC and a device is present */
+     double follow_until;          /* poll fast until then, after a key */
+     double next_arc;
      int  page;                             /* settings page shown */
      int  val[MAX_ROWS], val_known;         /* its row values */
      int  vis_row[MAX_ROWS], nrows_vis;     /* rows this TV supports */
@@ -555,7 +563,7 @@ static void draw_toast(struct app *a, cv_t *c)
 static void draw_volume(struct app *a, cv_t *c)
 {
      int w = 680, h = 104, x = (a->W - w) / 2, y = a->H - 200;
-     int v = a->vol < 0 ? 0 : a->vol > 100 ? 100 : a->vol;
+     int v = a->vol_shown < 0 ? 0 : a->vol_shown > 100 ? 100 : a->vol_shown;
      int bx = x + 190, bw = w - 190 - 56;
      if (c) {
           gfx_shadow(c, x, y, w, h, h / 2, 24, 0x90000000);
@@ -567,7 +575,7 @@ static void draw_volume(struct app *a, cv_t *c)
                                K_ACCENT_L, K_ACCENT_R);
      } else {
           char label[16];
-          snprintf(label, sizeof(label), a->mute ? "Muted" : "%d", a->vol);
+          snprintf(label, sizeof(label), a->mute ? "Muted" : "%d", v);
           text_v(a, a->f_tiny, x + 56, y + 14, 34, K_TEXT3, "VOLUME", -1);
           text_v(a, a->mute ? a->f_item : a->f_head, x + 56, y + 40, 54, K_TEXT, label, -1);
      }
@@ -654,6 +662,19 @@ static void poll_inputs(struct app *a)
      }
 }
 
+
+static void poll_arc(struct app *a)
+{
+     int spk = 0, dev = 0;
+     biz_get_int(BIZ_KEY_SPEAKER, &spk);
+     biz_get_int(BIZ_KEY_ARC_DEVICE, &dev);
+     int arc = spk == 2 && dev == 1;
+     if (arc != a->arc) {
+          printf("output: %s\n", arc ? "soundbar (ARC)" : "TV");
+          a->arc = arc;
+     }
+}
+
 static void poll_volume(struct app *a, double now)
 {
      int vol = a->vol, mute = a->mute;
@@ -661,13 +682,14 @@ static void poll_volume(struct app *a, double now)
      biz_get_int(BIZ_KEY_VOLUME, &vol);
      biz_get_int(BIZ_KEY_MUTE, &mute);
      if (a->vol_known && (vol != a->vol || mute != a->mute)) {
-          printf("volume %d mute %d\n", vol, mute);
+          printf("volume %d mute %d t=%.2f\n", vol, mute, now);
           a->vol_until = now + 2.5;
           a->dirty = 1;
      }
      a->vol = vol;
      a->mute = mute;
      a->vol_known = 1;
+     a->vol_shown = vol;
 }
 
 /* read every row of the open page, and which rows this TV supports */
@@ -904,21 +926,30 @@ static void on_key(struct app *a, int k, int repeat, double now)
           /* nothing else acts on these with the stock page blanked; the stock
            * UI used to call modeljs.sound.setMainVolume */
           int r;
-          if (k == DIKS_MUTE) {
+          if (a->arc) {
+               /* the system sends the key to the soundbar; show what it
+                * reports, polling fast for a moment */
+               a->follow_until = now + 1.5;
+               a->next_vol = now + 0.1;
+               r = 0;
+          } else if (k == DIKS_MUTE) {
                a->mute = !a->mute;
                r = biz_set_int(BIZ_KEY_MUTE, a->mute);
           } else {
-               int v = a->vol + (k == DIKS_VOLUME_UP ? 1 : -1);
-               a->vol = v < 0 ? 0 : v > 100 ? 100 : v;
+               int d = k == DIKS_VOLUME_UP ? 1 : -1;
                if (a->mute) {               /* volume keys unmute */
                     a->mute = 0;
                     biz_set_int(BIZ_KEY_MUTE, 0);
                }
+               int v = a->vol + d;
+               a->vol = v < 0 ? 0 : v > 100 ? 100 : v;
+               a->vol_shown = a->vol;
                r = biz_set_int(BIZ_KEY_VOLUME, a->vol);
           }
-          printf("volume %d mute %d (set r=%d)\n", a->vol, a->mute, r);
+          printf("volume key: shown %d mute %d (r=%d)\n", a->vol_shown, a->mute, r);
           a->vol_until = now + 2.5;
-          a->next_vol = now + 0.5;
+          if (!a->arc)
+               a->next_vol = now + 0.5;
           a->dirty = 1;
           return;
      }
@@ -1137,6 +1168,7 @@ int main(int argc, char **argv)
           printf("gui.loop.finished was %d, set 1 -> r=%d\n", v, r);
      }
      poll_inputs(a);
+     poll_arc(a);
      poll_volume(a, t0);
      printf("model: %d inputs, current %s, volume %d, mute %d (%.0f ms)\n",
             a->nin, a->cur, a->vol, a->mute, (vibe_now_s() - t0) * 1000);
@@ -1199,9 +1231,14 @@ int main(int argc, char **argv)
                }
           }
 
+          if (now >= a->next_arc) {
+               poll_arc(a);
+               a->next_arc = now + 2.0;
+          }
           if (now >= a->next_vol) {
                poll_volume(a, now);
-               a->next_vol = now + 0.4;
+               if (now >= a->next_vol)
+                    a->next_vol = now + (now < a->follow_until ? 0.1 : 0.4);
           }
           if (now >= a->next_inputs) {
                poll_inputs(a);

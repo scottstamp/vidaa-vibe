@@ -639,6 +639,37 @@ right.
   partly unmeasured. Fills were made more opaque (cards 0xeb, panels 0xf5,
   Home scrim 0xc0→0xf2).
 
+## More settings, and volume with a soundbar
+
+2026-11-25. New pages, with keys taken from `libcobalt.so`
+(`tools/modeljs_keys.py`):
+
+| Page | Row | Key | Values |
+| --- | --- | --- | --- |
+| Sound | Output | `kilby.sl2.i32.sound.speaker.arc.mode` | 1 TV speakers, 2 ARC, 3 optical (0 off, 4 Bluetooth, 5 WiSA not offered) |
+| Sound | eARC | `kilby.sl2.i32.sound.earc.switch.value` | 0/1 |
+| Sound | Sound mode | `kilby.sl2.i32.sound.enum.adjust` | 0 Standard, 1 Speech, 2 Late Night, 3 Music, 4 Film, 5 Sport |
+| Game | Game mode | `kilby.sl2.i32.video.game.mode.enable` | 0/1 |
+| Game | Low latency | `kilby.sl2.i32.video.enum.instant.game.response` | 0 off, 1 on, 2 auto (shown if `...instant.game.response.supported` is 1). ALLM's own methods do not exist in this build; the bundle tags this one `PICTURE_GAME_ALLM_ENABLE` |
+| Sleep timer | Turn off after | `kilby.sl2.i32.timerfunctions.hotelmode.sleep.timer` | minutes: 0, 15, 30, 60, 90, 120 (stock list) |
+
+Device present on ARC: `kilby.sl2.i32.sound.arcdev.exist` (1 with the
+owner's eARC soundbar connected). The TV switched its output to ARC by
+itself when the soundbar was plugged in.
+
+**Volume with the soundbar** (owner and shell, 2026-11-25):
+- The system forwards the remote's VOLUME and MUTE keys to the soundbar
+  over CEC by itself, and `kilby.sl2.i32.sound.main.volume` then mirrors
+  the level the soundbar reports. This soundbar moves 3 per press.
+- Writing `main.volume` in ARC mode does **not** move the soundbar: the
+  model echoes the written value (9 → 10) and the soundbar stays where it
+  is (owner, by ear). The stock UI's comment agrees: "SetVolume do not
+  work in ARC mode".
+- So in ARC mode (`speaker.arc.mode` = 2 and `arcdev.exist` = 1)
+  `vibe-ui` writes nothing for volume or mute. It shows the bar and polls
+  every 0.1 s for 1.5 s after a key. The owner confirmed: no flicker, mute
+  and unmute work. With TV speakers it sets the values itself, as before.
+
 ## Way back
 
 `vibe` and `vibe-model` change nothing persistent themselves. Their only
