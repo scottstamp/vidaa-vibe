@@ -871,8 +871,13 @@ live: `api.hismarttv.com` and `geo-bas.vidaahub.com` fail in under a second,
 `github.com` resolves; after `iptables -F OUTPUT` (what `firewall-eulaon.sh`
 does to OUTPUT) the block still holds. The nat table was empty before, the
 TV has no global IPv6 address, REDIRECT is in
-`/proc/net/ip_tables_targets`. Not yet tested: the uid rules with a live
-process (the blocked services are not running), and a full boot.
+`/proc/net/ip_tables_targets`. Boot test (2026-11-25): `debloat.sh`
+at 8.0 s, nat `VIBE_OUT` hooked at 10.9 s and never again (no wipe); `tvmain`
+ran its EULA firewall setup at 9.7–9.8 s ("set firewall by eula" in
+syslog), before our hook. Filter `INPUT` held the SSH rule. Still not tested:
+the uid rules with a live process (the blocked services are dead within
+13 s). Building the chain takes about 3 s at boot (33 `iptables` runs); the
+block covers nothing before 10.9 s.
 
 ### Way back (written before the change)
 
