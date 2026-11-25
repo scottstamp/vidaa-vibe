@@ -842,6 +842,21 @@ marker checked before anything else, confirm only while mounted, and
 `hook-patch.sh` early steps that check the old hook + 2 lines round trip,
 the `start_db` call, and verify the write (restoring on mismatch).
 
+First boot with it (2026-11-25, `early.arm`, owner present). Hook lines
+applied with `early-apply` (hook md5 ae76… → b8c1…, owner kept,
+`otaTest.prev.bak` 9a6b… untouched). `early.log`: started 5.41 s, marker on
+disk 5.54 s, overlaid 5.56 s (hook stage0 5.36 s). `debloat.sh`'s first
+pass (8.56 s) found only TTSPlayer and dialserver (started by `app_man`
+regardless, as the review said) and `websdk` (kept on); Netflix and its
+splash, ota_upgrade, app_upgrade, hi_logreport_service, mosquitto,
+ai_manager, vidaa_ai_service, AirPlay, masman, mdharvester and
+reggieserver never started. Confirmed at 11.69 s (`hisenseUI` started,
+`early.history`). The boot also ran earlier: `boot.sh` 7.93 s, `vibe-ui`
+8.02 s, stock UI pieces stopped 14.23 s (previous boots 8.7–9.0 /
+9.5–9.9 / 18.3 s; one boot, less CPU contention is the likely reason).
+The browser still started (systemserver's autostart, lever 2) and was
+stopped at 22.7 s. SSH up, MemAvailable 899 MB.
+
 Way back:
 - Stop using it: `rm /var/local/vibe/early.on /var/local/vibe/early.arm`
   (next boot; the current boot's mount is harmless, `app_man` read the
