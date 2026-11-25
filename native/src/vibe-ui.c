@@ -1195,6 +1195,7 @@ int main(int argc, char **argv)
      }
 
      deadline = timeout > 0 ? vibe_now_s() + timeout : 0;
+     double refocus_after = 0;
      while (!stop_flag) {
           PADDED(DFBEvent, ev);
           double now = vibe_now_s();
@@ -1211,6 +1212,15 @@ int main(int argc, char **argv)
                     continue;
                if (we->type == DWET_GOTFOCUS || we->type == DWET_LOSTFOCUS) {
                     printf("%s\n", we->type == DWET_GOTFOCUS ? "got focus" : "lost focus");
+                    /* we own every key: if another window (the stock engine
+                     * starting after us) takes focus, take it back, at most
+                     * once a second */
+                    if (we->type == DWET_LOSTFOCUS && now >= refocus_after) {
+                         refocus_after = now + 1.0;
+                         a->win->RaiseToTop(a->win);
+                         printf("RequestFocus again: %s\n",
+                                DirectFBErrorString(a->win->RequestFocus(a->win)));
+                    }
                     continue;
                }
                if (we->type != DWET_KEYDOWN)

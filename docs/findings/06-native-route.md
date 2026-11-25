@@ -670,6 +670,87 @@ itself when the soundbar was plugged in.
   every 0.1 s for 1.5 s after a key. The owner confirmed: no flicker, mute
   and unmute work. With TV speakers it sets the values itself, as before.
 
+## Stopping unused services, and keeping off Hisense's servers
+
+The owner's choice (2026-11-25): stop every stock service this TV does not
+use (casting, AirPlay, RemoteNow, voice, Netflix and browser preloads,
+updaters, log and usage reporting, ACR), keep the internet for third-party
+services, and keep the TV off Hisense's servers with updates fully off.
+
+The model's own switches were already off when read:
+`system.upgrade.autofirmwareupgrade` 0, `system.upgrade.systemappautoupgrade`
+0, `acr.switch` 0 (all `kilby.sl2.i32.`). We do not rely on them alone.
+
+`native/tv/debloat.sh`, started once by `boot.sh`:
+
+- stops the processes in its `STOP` list and stops them again if they come
+  back (every 5 s for the first 2 minutes of uptime, every 60 s after);
+- adds the iptables chain `VIBE_OUT` at the top of `OUTPUT`. It refuses DNS
+  queries for any name under `vidaahub`, `hismarttv`, `hisense`,
+  `hisense-usa`, `hisenseusa`, `vidaa` and `juhaokan`, matched on the DNS
+  wire format, so subdomains built at run time are covered. It also refuses
+  non-loopback traffic from the updater and reporter uids (304, 305, 306,
+  312, 326, 337, 338, 339, 1032). Kernel matches `string` and `owner` exist
+  (`/proc/net/ip_tables_matches`); `iptables` is 1.8.4 legacy.
+
+Measured with the script started by hand at uptime about 83 minutes:
+
+- Killed and stayed dead: Netflix and its splash, the browser, QDA,
+  TTSPlayer, AirPlay, `ota_upgrade`, `hi_logreport_service`, `mosquitto`,
+  RemoteNow, `dlna_service`, `mdnsd`, `mdharvester`, `masman`,
+  `reggieserver`, `vidaa_ai_service`. `app_upgrade` came back once, then
+  stayed dead.
+- `app_man` respawns `restart_avs.sh` (and with it `avsservice`),
+  `dialserver` and `ai_manager` within about a second, every time. The
+  script freezes those with SIGSTOP the second time it sees them; frozen,
+  they stay alive, are not respawned, and use no CPU.
+- MemAvailable went from 642 MB to 792 MB.
+- In the first minute, `VIBE_OUT` refused 68 DNS queries under `vidaahub`,
+  32 under `hismarttv` and 16 under `hisense`. Third-party names still
+  resolve (`github.com` through 1.1.1.1).
+- The first version forked an `awk` per (name, process) pair, about 7,500
+  forks a pass. One pass took over a minute. It now reads `/proc/<pid>/status`
+  with the shell builtin `read`.
+- Bash 3.2 cannot parse `case … in *.sh) …` inside `$( )`; write `(*.sh)`.
+
+First boot with the script started by `boot.sh`: `boot.sh` at 7.98 s,
+`debloat.sh` at 13.48 s, `VIBE_OUT` in place at 14.30 s, all services
+stopped or frozen by 23.9 s, MemAvailable 855 MB right after boot. The 5.5 s
+between `boot.sh` and `debloat.sh` was `boot.sh` grepping every
+`/proc/*/cmdline` for an already-running copy; it now uses a marker,
+`/tmp/vibe-debloat.started` (tmpfs, gone at reboot). `ota_upgrade` and
+`mosquitto` ignore SIGTERM; the SIGKILL follow-up missed them because
+`name_of` overwrote the loop variable `k` (fixed), so they were frozen
+instead. Standby and wake, twice, with the frozen processes: worked, and
+nothing came back (owner, 2026-11-25). Owner also checked keys, inputs,
+volume and settings.
+
+Hostnames came from the binaries and caches (`grep -a` over `/usr/local`,
+`/basic`, `/opt`, `/3rd`, `/var/local`): `api.hismarttv.com` and
+`domain.vidaahub.com` in `app_upgrade`, `geo-bas` and
+`vidaa-base-auth(-eu).vidaahub.com` in `tvmain`, `time-bas.vidaahub.com` and
+`na.hismarttv.com` in `LauncherService`, `iot-voice`/`vidaa-voice` in
+`avsservice`, and about 40 `*.vidaahub.com` names in the browser's caches.
+`domain.vidaahub.com` looks like a service directory, so names can be built
+at run time; hence matching whole domains, not a hosts file. (`/etc/hosts` is
+a link to `/tmp/hosts`, writable, if a hosts file is ever wanted.)
+
+Known side effect, not yet observed: the TV's clock may come from
+`time-bas.vidaahub.com`; with it blocked, the clock may drift or be unset.
+Nothing in vibe-ui shows the time, and the sleep timer counts minutes.
+
+### Way back (written before the change)
+
+- Everything is in memory. A reboot without `debloat.sh` brings every
+  service and the stock firewall back.
+- `touch /var/local/vibe/debloat.off`: the running script removes
+  `VIBE_OUT` within 60 s and exits; services come back at the next reboot.
+- Firewall only, at once: `iptables -D OUTPUT -j VIBE_OUT`.
+- One service back: take it out of `STOP` (and its uid out of
+  `BLOCK_UIDS` if it needs the network), deploy, reboot.
+- `rm /var/local/vibe/debloat.sh` removes the feature; `boot.sh` starts it
+  only if the file exists.
+
 ## Way back
 
 `vibe` and `vibe-model` change nothing persistent themselves. Their only

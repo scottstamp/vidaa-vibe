@@ -14,7 +14,7 @@ for b in vibe vibe-model vibe-ui vibe-gam; do
 done
 # scripts may be running (boot.sh, vibe-run.sh): bash reads them as it goes,
 # so never rewrite one in place; write a new file and rename it over
-for f in vibe-run.sh boot.sh hook-patch.sh powermon.sh restart-ui.sh; do
+for f in vibe-run.sh boot.sh hook-patch.sh powermon.sh restart-ui.sh debloat.sh; do
     $SSH "cat > /var/local/vibe/$f.new && chmod 755 /var/local/vibe/$f.new && mv /var/local/vibe/$f.new /var/local/vibe/$f" < tv/$f
 done
 $SSH 'sync'

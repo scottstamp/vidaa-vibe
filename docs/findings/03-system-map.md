@@ -121,9 +121,72 @@ scripts did not rebuild `INPUT` after uptime 24 s in the boot observed.
 `OUTPUT` is not filtered while the EULA is accepted
 (`FIREWALL_OUT_EULAON` is defined and unattached).
 
+## Boot timeline and running cost (vibe-ui era)
+
+Measured 2026-11-25 over SSH, read-only, with slot B (blank stock page) and
+vibe-ui running, 66 minutes after a boot. Raw output:
+`research/58a51huv/recon/boot-recon-1.out`, `-2.out`.
+
+`/proc/boottime` is a vendor timeline the boot scripts write to (`echo "…" >
+/proc/boottime`). On this boot: `rcS` start 3.57 s, `start-hisense` (starts
+`superwatch`, `systemserver`, `tvmain`) 3.9–4.3 s, kernel modules until
+7.1 s (`mstar_fbdev_mi.ko` 7.09 s), `rc.local` 7.47–8.03 s, "MI daemon
+process start" 8.37 s. Process start times in `/proc/<pid>/stat` run on a
+different clock (`app_man` reads 5 s, `hisenseUI` 7 s, Netflix and the
+browser 8–18 s, `avsservice`, `remoteservice`, `dlna_service` 21 s, `QDA`
+28 s), so the two are not compared directly.
+
+Our start: `boot.sh` waits for `hisenseUI`, then sleeps 5 s, then starts
+`vibe-ui`, whose own init (DirectFB join plus model reads) took about 0.6 s
+for the model part. The 5 s sleep is the largest slack we own.
+
+RSS and CPU, sorted by memory (CPU is seconds since boot / ticks in a 10 s
+sample at idle):
+
+| Process | RSS MB | CPU s | Note |
+| --- | --- | --- | --- |
+| `tvmain` | 111 | 746 | TV service; needed (inputs, picture, sound, CEC) |
+| `netflix` (`GIBBON_MAIN`) + `nfxdevsplash` | 85 + 8 | 73 | preloaded at boot, unused |
+| `hisense_browser` (2 processes) | 55 + 29 | 204 | Chromium, started at boot, unused |
+| `hisenseUI` | 41 | 71 | blank page in slot B |
+| `avsservice` | 25 | 20 | Alexa voice |
+| `systemserver` | 20 | 104 | keys, power; needed |
+| `airplaydemo`, `airplay_bridge` | 18 + 7 | 14 | AirPlay |
+| `QDA` (`/3rd/ULI`) | 17 | 1 | started at 28 s although `power_on_start = false` |
+| `vibe-ui` | 13 | 2 | ours |
+| `app_upgrade`, `ota_upgrade` | 10 + 6 | 2 | updaters |
+| `hi_logreport_service` | 8 | 11 | log reporting |
+| `ai_manager`, `vidaa_ai_service` | 7 + 4 | 0 | "AI picture" |
+| `TTSPlayer` | 7 | 0 | text to speech |
+| `remoteservice`, `remoteapp_biz_client`, `mosquitto` | 7 + 6 + 3 | 8 | RemoteNow phone app |
+| `dialserver`, `dlna_service`, `mdnsd` | 5 + 3 + 1 | 9 | casting, discovery |
+| `mdharvester`, `masman`, `reggieserver` | 5 + 4 + 1 | 0 | started by init, roles not mapped |
+| `websdk` | 6 | 11 | browser file bridge; the hook's disarm of last resort, keep |
+
+Load average reads about 47 at idle. That is not load: about 45 MStar driver
+threads (`HDMI`, `CEC`, `VMon_Task`, `DMX_Filt_Task`, …) sit in state D.
+Real idle CPU is low; the browser, Netflix and the stock engine together used
+about 1 % of the machine in the 10 s sample.
+
+`/basic/am_config` (on the verified root filesystem, read-only) lists 45
+sections. `power_on_start = true` for, among others: `hisenseUI`,
+`AirPlayBridge`, `ota_upgrade`, `hi_logreport_service`, `resmon`,
+`app_upgrade`, `LauncherService`, `HiAvsService`, `mosquitto`, `dialserver`,
+`ai_manager`, `vidaa_ai_service`, `websdk`, `TTSPlayer`, `apm_bond`. It cannot
+be edited, and `app_man` reads it before our hook runs, so services can only
+be stopped after they start.
+
+`superwatch` (root, from `start-hisense.sh`) is not a process watchdog. Its
+strings show a command fifo `/var/run/superwatch` with commands to collect
+logs (`getlog`, `start-getlog.sh`), drop caches, `fstrim`, clone hotel
+settings from USB, make PVR directories, write `/var/tvservice/tvRunningTime`
+and `reboot`. Read from strings only.
+
 ## Not mapped
 
 - What starts `start-hisense.sh` and `app_man`.
-- What `superwatch` supervises and what it does when a process dies.
+- What `app_man` does when a service it started dies (relaunch or not), per
+  service.
+- Who launches Netflix, the browser and `QDA` after boot.
 - `LauncherService`'s role and protocol.
 - How `app_man` decides focus and key routing between apps.

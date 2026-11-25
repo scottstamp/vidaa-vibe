@@ -37,11 +37,21 @@ fi
 off() { [ -f $V/off ] || [ -f /var/local/vibe-off ]; }
 if off; then echo "off switch present, not starting"; exit 0; fi
 
-# wait for app_man to have the stock engine up: the DirectFB world exists then
+# stop the unused stock services early, so they stop competing for the CPU
+# while we start. Once per boot (restart-ui.sh runs this script again); the
+# marker is on tmpfs. (Grepping every /proc/*/cmdline instead took 5.5 s.)
+if [ -f $V/debloat.sh ] && [ ! -f /tmp/vibe-debloat.started ]; then
+    : > /tmp/vibe-debloat.started
+    $BB setsid /bin/sh $V/debloat.sh </dev/null >/dev/null 2>&1 &
+    echo "debloat.sh started at uptime $(up)"
+fi
+
+# wait for app_man to have the stock engine up: the DirectFB world exists
+# then. No settle delay: vibe-ui takes focus back if the engine's window
+# takes it.
 i=0
-while [ -z "$(pidof hisenseUI)" ] && [ $i -lt 90 ]; do sleep 2; i=$((i+1)); done
+while [ -z "$(pidof hisenseUI)" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done
 echo "hisenseUI=[$(pidof hisenseUI)] at uptime $(up)"
-sleep 5
 
 n=0
 while [ $n -lt 10 ]; do
