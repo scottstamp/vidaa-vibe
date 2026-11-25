@@ -165,3 +165,9 @@ int biz_switch_off_tv(int reason)
      const char *a[1] = { r };
      return biz_action(BIZ_ACTION_POWER_OFF, 1, a);
 }
+
+int biz_reset_picture(void)
+{
+     const char *a[1] = { "1" };
+     return biz_action(BIZ_ACTION_PICTURE_RESET, 1, a);
+}

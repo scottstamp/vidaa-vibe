@@ -35,7 +35,22 @@ void   biz_vec_free(char **v);
  * Only with gui.loop.finished = 1: before that it left the TV in a standby
  * POWER did not wake (docs/findings/06). */
 #define BIZ_ACTION_POWER_OFF  "kilby.action.system.switch.off.tv"
-#define BIZ_POWER_OFF_SLEEP_TIMER 4      /* the stock UI's reason at sleep-timer end */
+/* reasons, from the stock JS (app.js MODELJS_DEFINE): SWITCH_OFF_TV_TIMER 2
+ * (sleep timer), SWITCH_OFF_TV_AUTO 3 (no-signal standby, auto sleep),
+ * SWITCH_OFF_TV_CURTAIN 4 */
+#define BIZ_POWER_OFF_TIMER   2
+#define BIZ_POWER_OFF_AUTO    3
+/* no-signal standby: 0 off, 1 "15 minutes". tvmain only stores it: the UI
+ * counts (14 min on panel type 0, then a 60 s warning) and switches off
+ * (Setting.js / LiveTV.js) */
+#define BIZ_KEY_NOSIGNAL_STANDBY "kilby.sl2.i32.system.nosignal.autostandby"
+/* HDMI signal format: 0 Standard, 1 Enhanced, 2 Auto; one value, offered by
+ * the stock UI only while an HDMI input is showing, if 4K is supported */
+#define BIZ_KEY_HDMI_FORMAT   "kilby.sl2.i32.video.enum.hdmi.signal.format"
+#define BIZ_KEY_4K_SUPPORTED  "kilby.sl2.i32.video.4k.mode.supported"
+/* modeljs.video.ResetDefaultPictureSettings([1]): resets the current picture
+ * mode (NOT ...reset.picture.settings.shopmode.onTimer, store mode) */
+#define BIZ_ACTION_PICTURE_RESET "kilby.sl2.action.video.reset.picture.settings"
 /* 1 screen on, 0 off (standby) */
 #define BIZ_KEY_SCREEN_STATE  "kilby.sl2.i32.system.enum.screen.state"
 /* stock SDK: system.uiLoadFinish(1) -> modeljs.system.setGuiLoopFinished(1).
@@ -85,5 +100,7 @@ int biz_set_picture_mode(int mode);
 int biz_rename_input(const char *id, const char *name);
 /* stock: system.SwitchOffTv([reason]) */
 int biz_switch_off_tv(int reason);
+/* stock: video.ResetDefaultPictureSettings([1]) */
+int biz_reset_picture(void);
 
 #endif

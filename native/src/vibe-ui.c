@@ -64,7 +64,8 @@ static const char *const picture_modes[] = {
 #define N_MODES 7
 
 /* ---- settings pages: rows of choices and sliders over model keys */
-enum row_kind { R_CHOICE, R_SLIDER };
+/* R_ACTION: OK runs it, after a second OK to confirm (key = the action) */
+enum row_kind { R_CHOICE, R_SLIDER, R_ACTION };
 
 struct setting_row {
      const char *name;
@@ -78,6 +79,7 @@ struct setting_row {
 };
 
 static int set_picture_mode(int v) { return biz_set_picture_mode(v); }
+static int do_picture_reset(int v) { (void)v; return biz_reset_picture(); }
 
 static const int v_mode[] = { 0, 1, 2, 3, 4, 5, 6 };
 static const int v_off_on[] = { 0, 1 };
@@ -90,6 +92,9 @@ static const int v_igr[] = { 0, 1, 2 };
 static const char *const n_igr[] = { "Off", "On", "Auto" };
 static const int v_sleep[] = { 0, 15, 30, 60, 90, 120 };
 static const char *const n_sleep[] = { "Off", "15 min", "30 min", "60 min", "90 min", "120 min" };
+static const char *const n_nosig[] = { "Off", "After 15 min" };
+static const int v_hdmi_fmt[] = { 0, 1, 2 };
+static const char *const n_hdmi_fmt[] = { "Standard", "Enhanced", "Auto" };
 
 static const struct setting_row rows_picture[] = {
      { "Picture mode", R_CHOICE, BIZ_KEY_PICTURE_MODE, 7, v_mode, picture_modes, set_picture_mode, NULL },
@@ -98,6 +103,7 @@ static const struct setting_row rows_picture[] = {
      { "Contrast",   R_SLIDER, BIZ_KEY_CONTRAST,   0, NULL, NULL, NULL, NULL },
      { "Colour",     R_SLIDER, BIZ_KEY_COLOUR,     0, NULL, NULL, NULL, NULL },
      { "Sharpness",  R_SLIDER, BIZ_KEY_SHARPNESS,  0, NULL, NULL, NULL, NULL },
+     { "Reset picture mode", R_ACTION, BIZ_ACTION_PICTURE_RESET, 0, NULL, NULL, do_picture_reset, NULL },
 };
 static const struct setting_row rows_sound[] = {
      { "Output",     R_CHOICE, BIZ_KEY_SPEAKER,    3, v_speaker, n_speaker, NULL, NULL },
@@ -107,9 +113,12 @@ static const struct setting_row rows_sound[] = {
 static const struct setting_row rows_game[] = {
      { "Game mode",  R_CHOICE, BIZ_KEY_GAME_MODE,  2, v_off_on, n_off_on, NULL, NULL },
      { "Low latency", R_CHOICE, BIZ_KEY_IGR, 3, v_igr, n_igr, NULL, BIZ_KEY_IGR_SUPPORTED },
+     { "HDMI format", R_CHOICE, BIZ_KEY_HDMI_FORMAT, 3, v_hdmi_fmt, n_hdmi_fmt, NULL, BIZ_KEY_4K_SUPPORTED },
 };
 static const struct setting_row rows_sleep[] = {
      { "Turn off after", R_CHOICE, BIZ_KEY_SLEEP_TIMER, 6, v_sleep, n_sleep, NULL, NULL },
+     /* the stock list (Off, 15 minutes); panel type 0 here, so always shown */
+     { "No-signal standby", R_CHOICE, BIZ_KEY_NOSIGNAL_STANDBY, 2, v_off_on, n_nosig, NULL, NULL },
 };
 
 #define MAX_ROWS 8
@@ -118,10 +127,10 @@ static const struct page {
      const struct setting_row *rows;
      int nrows;
 } pages[] = {
-     { "Picture", "Mode, colour", rows_picture, 6 },
+     { "Picture", "Mode, colour", rows_picture, 7 },
      { "Sound", "Output, mode", rows_sound, 3 },
-     { "Game", "Low latency", rows_game, 2 },
-     { "Sleep timer", "Turn off later", rows_sleep, 1 },
+     { "Game", "Latency, HDMI", rows_game, 3 },
+     { "Sleep timer", "Turn off later", rows_sleep, 2 },
 };
 #define N_PAGES 4
 #define PAGE_PICTURE 0
@@ -201,8 +210,12 @@ struct app {
       * own deadline from when the timer was set (docs/findings/06). */
      double sleep_deadline;        /* 0: no timer */
      int  sleep_warned;            /* the last-minute countdown is showing */
+     int  sleep_kind;              /* OFF_TIMER or OFF_NOSIG, 0 when not armed */
+     int  nosig_standby;           /* setting: switch off after 15 min with no signal */
      double next_sleep_tick;
      int  page;                             /* settings page shown */
+     double confirm_until;                  /* an action row waits for its 2nd OK */
+     int  confirm_row;
      int  val[MAX_ROWS], val_known;         /* its row values */
      int  vis_row[MAX_ROWS], nrows_vis;     /* rows this TV supports */
 
@@ -525,6 +538,9 @@ static void draw_settings(struct app *a, cv_t *c)
 {
      const struct page *p = &pages[a->page];
      int x0 = r_x(a), rx = x0 + 28, rw = R_W - 56, row_h = 118;
+     /* rows shrink to fit the screen (the slider row needs ~92) */
+     if (a->nrows_vis > 0 && 150 + a->nrows_vis * (row_h + 8) + 120 > a->H - 80)
+          row_h = (a->H - 80 - 270) / a->nrows_vis - 8;
      /* sheet sized to its rows, centred vertically */
      int h = 150 + a->nrows_vis * (row_h + 8) + 120;
      if (h > a->H - 80) h = a->H - 80;
@@ -540,7 +556,18 @@ static void draw_settings(struct app *a, cv_t *c)
                rect_add(&g_focus, rx, y, rx + rw, y + row_h);
                gfx_rrect(c, rx, y, rw, row_h, 24, K_CARD_HI);
           }
-          if (r->kind == R_CHOICE) {
+          if (r->kind == R_ACTION) {
+               int armed = sel && a->confirm_row == a->vis_row[j] && vibe_now_s() < a->confirm_until;
+               const char *m = armed ? "OK again to confirm" : "Press OK";
+               int pw = 320, px = rx + rw - 28 - pw, ph = 56, py = y + (row_h - ph) / 2;
+               if (c) {
+                    if (sel) focus_fill(c, px, py, pw, ph, ph / 2);
+                    else gfx_rrect(c, px, py, pw, ph, ph / 2, K_CARD);
+               } else {
+                    text_v(a, a->f_item, rx + 32, y, row_h, sel ? K_TEXT : K_TEXT2, r->name, -1);
+                    text_v(a, armed ? a->f_bold : a->f_small, px + pw / 2, py, ph, K_TEXT, m, 0);
+               }
+          } else if (r->kind == R_CHOICE) {
                const char *m = a->val_known ? choice_name(r, v) : "...";
                int pw = 320, px = rx + rw - 28 - pw, ph = 56, py = y + (row_h - ph) / 2;
                if (c) {
@@ -566,7 +593,9 @@ static void draw_settings(struct app *a, cv_t *c)
           }
      }
      static const char *const hh[] = { "LEFT/RIGHT", "Change", "BACK", "Back" };
-     hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, 2);
+     static const char *const hh_act[] = { "OK", "Run", "BACK", "Back" };
+     int on_action = a->sel < a->nrows_vis && p->rows[a->vis_row[a->sel]].kind == R_ACTION;
+     hints(a, c, x0 + R_W / 2, y0 + h - 76, on_action ? hh_act : hh, 2);
 }
 
 #define LIST_ROW_H 92
@@ -1064,7 +1093,8 @@ static void poll_page(struct app *a)
           const struct setting_row *r = &p->rows[i];
           int ok = 1;
           v[i] = 0;
-          biz_get_int(r->key, &v[i]);
+          if (r->kind != R_ACTION)          /* an action has no value to read */
+               biz_get_int(r->key, &v[i]);
           if (r->needs) {
                int s = 0;
                biz_get_int(r->needs, &s);
@@ -1130,29 +1160,52 @@ static void toast(struct app *a, const char *msg, double now)
      a->dirty = 1;
 }
 
-/* ---- sleep timer */
+/* ---- sleep timer and no-signal standby: one switch-off countdown, armed
+ * by either (OFF_TIMER: the Sleep timer setting; OFF_NOSIG: 14 min with no
+ * signal, the stock no-signal standby). Both end in the same last minute. */
+enum { OFF_TIMER = 1, OFF_NOSIG = 2 };
+#define NOSIG_STANDBY_S (14 * 60)       /* stock, panel type 0; + the last minute */
+
 static void sleep_arm(struct app *a, int minutes, double now)
 {
      a->sleep_warned = 0;
      if (minutes > 0) {
           a->sleep_deadline = now + minutes * 60.0;
+          a->sleep_kind = OFF_TIMER;
           printf("sleep timer: off at %.0f (in %d min)\n", a->sleep_deadline, minutes);
      } else {
           if (a->sleep_deadline)
                printf("sleep timer: disarmed\n");
           a->sleep_deadline = 0;
+          a->sleep_kind = 0;
      }
 }
 
-/* cancelled by a key in the last minute, or by standby: Off in the model too */
+/* no signal for NOSIG_STANDBY_S: the last minute starts now */
+static void nosig_arm(struct app *a, double now)
+{
+     a->sleep_deadline = now + 60;
+     a->sleep_kind = OFF_NOSIG;
+     a->sleep_warned = 0;
+     printf("no-signal standby: off at %.0f\n", a->sleep_deadline);
+}
+
+/* cancelled by a key in the last minute, by standby, or (no-signal) by the
+ * signal coming back */
 static void sleep_cancel(struct app *a, const char *why, double now, int say)
 {
-     printf("sleep timer: cancelled (%s)\n", why);
+     int kind = a->sleep_kind;
+     printf("%s: cancelled (%s)\n", kind == OFF_NOSIG ? "no-signal standby" : "sleep timer", why);
      sleep_arm(a, 0, now);
-     biz_set_int(BIZ_KEY_SLEEP_TIMER, 0);
-     a->val_known = 0;                  /* the Sleep page shows the new value */
+     if (kind == OFF_NOSIG) {
+          /* as the stock UI: a key starts the no-signal wait again */
+          a->nosig_since = now;
+     } else {
+          biz_set_int(BIZ_KEY_SLEEP_TIMER, 0);     /* Off in the model too */
+          a->val_known = 0;                        /* the Sleep page shows it */
+     }
      if (say)
-          toast(a, "Sleep timer off", now);
+          toast(a, kind == OFF_NOSIG ? "Staying on" : "Sleep timer off", now);
      else
           a->toast_until = 0;
      a->dirty = 1;
@@ -1164,15 +1217,21 @@ static void sleep_tick(struct app *a, double now)
           return;
      double left = a->sleep_deadline - now;
      if (left <= 0) {
-          printf("sleep timer: switching off\n");
+          int kind = a->sleep_kind;
+          int reason = kind == OFF_NOSIG ? BIZ_POWER_OFF_AUTO : BIZ_POWER_OFF_TIMER;
+          printf("%s: switching off\n", kind == OFF_NOSIG ? "no-signal standby" : "sleep timer");
           a->sleep_deadline = 0;
+          a->sleep_kind = 0;
           a->sleep_warned = 0;
           a->screen = S_NONE;
           a->toast_until = 0;
           a->dirty = 1;
-          int r = biz_switch_off_tv(BIZ_POWER_OFF_SLEEP_TIMER);
-          printf("switch.off.tv [%d] -> r=%d\n", BIZ_POWER_OFF_SLEEP_TIMER, r);
-          biz_set_int(BIZ_KEY_SLEEP_TIMER, 0);
+          int r = biz_switch_off_tv(reason);
+          printf("switch.off.tv [%d] -> r=%d\n", reason, r);
+          if (kind == OFF_TIMER)
+               biz_set_int(BIZ_KEY_SLEEP_TIMER, 0);
+          else
+               a->nosig_since = now;              /* after wake, wait afresh */
           return;
      }
      if (left > 60)
@@ -1183,7 +1242,9 @@ static void sleep_tick(struct app *a, double now)
           printf("sleep timer: last minute\n");
      }
      if (now >= a->next_sleep_tick) {
-          snprintf(a->toast, sizeof(a->toast), "Turning off in %d s \xc2\xb7 any key cancels",
+          snprintf(a->toast, sizeof(a->toast),
+                   a->sleep_kind == OFF_NOSIG ? "No signal: off in %d s \xc2\xb7 any key cancels"
+                                              : "Turning off in %d s \xc2\xb7 any key cancels",
                    (int)(left + 0.999));
           a->toast_until = now + 1.5;
           a->next_sleep_tick = now + 1.0;
@@ -1275,10 +1336,40 @@ static void key_settings(struct app *a, int k, int repeat, double now)
      const struct page *p = &pages[a->page];
      int d = 0;
      switch (k) {
-     case DIKS_CURSOR_UP:    list_move(a, a->nrows_vis, -1); return;
-     case DIKS_CURSOR_DOWN:  list_move(a, a->nrows_vis, +1); return;
+     case DIKS_CURSOR_UP:
+     case DIKS_CURSOR_DOWN: {
+          /* the hint bar differs on an action row: a full frame when the
+           * move crosses between kinds (a partial one would leave it stale) */
+          int was = a->sel < a->nrows_vis && p->rows[a->vis_row[a->sel]].kind == R_ACTION;
+          list_move(a, a->nrows_vis, k == DIKS_CURSOR_UP ? -1 : +1);
+          int is = a->sel < a->nrows_vis && p->rows[a->vis_row[a->sel]].kind == R_ACTION;
+          if (was != is)
+               a->dirty = 1;
+          return;
+     }
      case DIKS_CURSOR_LEFT:  d = -1; break;
      case DIKS_CURSOR_RIGHT: d = +1; break;
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
+          if (repeat || !a->val_known || a->sel >= a->nrows_vis)
+               return;
+          {
+               int ri = a->vis_row[a->sel];
+               const struct setting_row *r = &p->rows[ri];
+               if (r->kind != R_ACTION)
+                    return;
+               if (a->confirm_row == ri && now < a->confirm_until) {
+                    int rc = r->set(0);
+                    printf("%s: %s -> r=%d\n", p->title, r->name, rc);
+                    a->confirm_until = 0;
+                    toast(a, rc == 1 ? "Done" : "Did not work", now);
+                    a->next_pic = now + 0.6;     /* values change: read again */
+               } else {
+                    a->confirm_row = ri;         /* ask for a second OK */
+                    a->confirm_until = now + 4.0;
+               }
+               a->dirty = 1;
+          }
+          return;
      case DIKS_BACK:
           open_screen(a, S_HOME, now); a->row = 1; a->col = a->page;
           return;
@@ -1293,6 +1384,8 @@ static void key_settings(struct app *a, int k, int repeat, double now)
      int ri = a->vis_row[a->sel];
      const struct setting_row *r = &p->rows[ri];
      int v, rc;
+     if (r->kind == R_ACTION)
+          return;                       /* OK, not LEFT/RIGHT */
      if (r->kind == R_CHOICE) {
           if (repeat)
                return;                  /* one step per press */
@@ -1307,8 +1400,15 @@ static void key_settings(struct app *a, int k, int repeat, double now)
           v = v < 0 ? 0 : v > 100 ? 100 : v;
      }
      rc = r->set ? r->set(v) : biz_set_int(r->key, v);
-     if (!strcmp(r->key, BIZ_KEY_SLEEP_TIMER))
+     /* the countdown is shared: setting the timer to Off must not drop a
+      * running no-signal countdown, and the other way round */
+     if (!strcmp(r->key, BIZ_KEY_SLEEP_TIMER) && (v > 0 || a->sleep_kind == OFF_TIMER))
           sleep_arm(a, v, now);
+     if (!strcmp(r->key, BIZ_KEY_NOSIGNAL_STANDBY)) {
+          a->nosig_standby = v == 1;
+          if (!a->nosig_standby && a->sleep_kind == OFF_NOSIG)
+               sleep_cancel(a, "setting off", now, 0);
+     }
      printf("%s: %s = %d -> r=%d\n", p->title, r->name, v, rc);
      a->val[ri] = v;
      /* a change can move other rows (picture mode moves the sliders); the
@@ -1820,6 +1920,11 @@ int main(int argc, char **argv)
                int scr = 1;
                if (a->sleep_deadline && biz_get_int(BIZ_KEY_SCREEN_STATE, &scr) == 1 && scr == 0)
                     sleep_cancel(a, "standby", now, 0);
+               int ns = 0;
+               if (biz_get_int(BIZ_KEY_NOSIGNAL_STANDBY, &ns) == 1 && (ns == 1) != a->nosig_standby) {
+                    a->nosig_standby = ns == 1;
+                    printf("no-signal standby setting: %d\n", a->nosig_standby);
+               }
           }
           sleep_tick(a, now);
           if (now >= a->next_vol) {
@@ -1834,6 +1939,19 @@ int main(int argc, char **argv)
                a->next_inputs = now + (a->screen != S_NONE || a->nosig_lost ? 1.0 : 3.0);
           }
           check_signal(a, now);
+          /* no-signal standby: 14 min without signal on the current input,
+           * then the last minute; a signal (or another input) ends it */
+          if (a->sleep_kind == OFF_NOSIG && !a->nosig_lost)
+               sleep_cancel(a, "signal back", now, 0);
+          else if (a->nosig_standby && a->nosig_lost && !a->sleep_deadline &&
+                   now - a->nosig_since >= NOSIG_STANDBY_S)
+               nosig_arm(a, now);
+          /* an action row's "OK again" ran out: draw it plain again */
+          if (a->confirm_until && now >= a->confirm_until) {
+               a->confirm_until = 0;
+               if (a->screen == S_SETTINGS)
+                    a->dirty = 1;
+          }
           if (a->screen == S_SETTINGS && now >= a->next_pic) {
                poll_page(a);
                a->next_pic = now + 1.0;
