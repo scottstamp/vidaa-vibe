@@ -83,6 +83,8 @@ LDFLAGS="-L$LIB -ldirectfb -ldirect -lfusion -lpthread -Wl,--allow-shlib-undefin
 # Jellyfin: command-line client (libcurl by dlopen)
 JF_SRC="src/jf.c src/http.c third_party/cjson/cJSON.c"
 "$ZIG" cc $CFLAGS -o "$OUT/vibe-jf" src/vibe-jf.c $JF_SRC -ldl -lpthread $COMMON_LD
+# the player child (libhmplayer by dlopen; re-execs itself with the vendor library path)
+"$ZIG" cc $CFLAGS -o "$OUT/vibe-play" src/vibe-play.c src/common.c -ldl -lpthread $COMMON_LD
 # benchmark of the drawing primitives (not deployed by default)
 "$ZIG" cc $CFLAGS -o "$OUT/gfx_bench" tools/gfx_bench.c src/gfx.c -lm $COMMON_LD
 ls -la "$OUT/vibe" "$OUT/vibe-model" "$OUT/vibe-ui" "$OUT/vibe-gam"
