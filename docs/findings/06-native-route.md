@@ -589,6 +589,15 @@ remote, with Linux and every process up throughout, exactly as on stock.
 itself loaded, the system takes POWER before any window does. Our app does
 nothing for power; it only sets the flag at start.
 
+## Custom input names
+
+Rename → input → "Custom name…" opens an on-screen keyboard (digits, a–z
+with one-shot Shift, `' - . &`, Space, Delete, Done; the remote's digit keys
+type digits; BACK cancels). Up to 15 characters, the longest preset's
+length. Done with nothing typed restores the input's own id. The field
+starts with the current name if it is neither the id nor a preset. Uses the
+same `source.input.rename` action as the presets.
+
 ## The UI, and registering with app_man
 
 2026-11-25. `vibe-ui` grew a Home screen (Inputs and Settings rows), a
@@ -838,6 +847,26 @@ are, and both are inside `tvmain` (verified partition, not changeable).
 After a power cut or a reboot, expect about 30 s before CEC works. The
 syslog rotated past the boot lines by 35 s on that boot: CEC traffic fills
 both 512 KB files fast, so read it early.
+
+Who sends the volume keys to the soundbar: `systemserver` itself. Its IR
+reader (`bspirkey.cpp`) hands each press to `key-event-dispatcher.cpp`,
+which asks `apm.cpp:isCECHotKey()` (true when `m_iCecState` 1,
+`m_iARCExits` 1, `m_iArcMode` 2) and then "Post hot key to cec": `tvmain`
+queues `<User Control Pressed>` 0x44 / `<Released>` 0x45. This happens
+before and apart from the DirectFB event vibe-ui gets, so vibe-ui cannot
+hold presses back once the soundbar is found. Before it is found the check
+is false: nothing is forwarded, and vibe-ui used to change the TV speakers'
+volume instead.
+
+vibe-ui now remembers that a soundbar is normally connected
+(`/var/local/vibe/state/soundbar`, "1"/"0", owned by UhisUI; `boot.sh`
+creates the directory). It is set to 1 when the output is the soundbar, to 0
+when a soundbar is present but another output is chosen, or after a minute
+with no ARC device once past 120 s of uptime. While it is 1 and the
+soundbar is not connected, VOL+/VOL-/MUTE are dropped with a "Sound system
+connecting…" notice. For 45 s after a connection made in the first 150 s of
+uptime, presses go through (they must) with a "Sound system starting, volume
+may lag" notice.
 
 From standby the soundbar connects at once and responds within a couple of
 seconds of wake (owner), so this only matters after a cold boot. Decision

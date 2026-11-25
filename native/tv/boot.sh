@@ -37,6 +37,10 @@ fi
 off() { [ -f $V/off ] || [ -f /var/local/vibe-off ]; }
 if off; then echo "off switch present, not starting"; exit 0; fi
 
+# vibe-ui's own state (e.g. "a soundbar is normally connected"), owned by
+# the UI user it runs as, never by root
+mkdir -p $V/state && chown 311:311 $V/state && chmod 755 $V/state
+
 # optional read-only boot probe (CEC timing), only if switched on
 if [ -f $V/cecmon.on ] && [ -f $V/cecmon.sh ]; then
     $BB setsid /bin/sh $V/cecmon.sh </dev/null >/dev/null 2>&1 &

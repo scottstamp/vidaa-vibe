@@ -56,7 +56,7 @@ static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 /* SIGUSR1: write the next frame (our layer only) to /tmp/vibe-shot.raw */
 static void on_usr1(int sig) { (void)sig; shot_flag = 1; }
 
-enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_RENAME_INPUT, S_RENAME_NAME };
+enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_RENAME_INPUT, S_RENAME_NAME, S_KEYBOARD };
 
 static const char *const picture_modes[] = {
      "Dynamic", "Standard", "Cinema Night", "Cinema Day", "Game", "Sport", "Calibrated"
@@ -126,12 +126,28 @@ static const struct page {
 #define N_PAGES 4
 #define PAGE_PICTURE 0
 
+/* the "Custom name..." row: opens the on-screen keyboard */
+static const char KB_ENTRY[] = "";
 static const char *const name_presets[] = {
-     NULL /* default: the input's own id */, "Apple TV", "PlayStation", "Xbox",
-     "Nintendo Switch", "PC", "Chromecast", "Fire TV", "Roku", "Blu-ray",
+     NULL /* default: the input's own id */, KB_ENTRY, "Apple TV", "PlayStation",
+     "Xbox", "Nintendo Switch", "PC", "Chromecast", "Fire TV", "Roku", "Blu-ray",
      "Cable box", "Game console",
 };
-#define N_PRESETS 12
+#define N_PRESETS 13
+
+/* on-screen keyboard: 4 rows of characters, then Shift, Space, Delete, Done */
+#define KB_MAX   15                 /* as long as the longest preset */
+#define KB_COLS  10
+#define KB_ROWS  5
+static const char *const kb_chars[4] = { "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm-.&" };
+enum { KB_SHIFT, KB_SPACE, KB_DELETE, KB_DONE, KB_NACT };
+static const int kb_act_col[KB_NACT] = { 0, 2, 6, 8 };   /* first column of each */
+static const int kb_act_w[KB_NACT]   = { 2, 4, 2, 2 };   /* columns it spans */
+static const char *const kb_act_name[KB_NACT] = { "Shift", "Space", "Delete", "Done" };
+
+/* "a soundbar is normally connected", kept across boots (the directory is
+ * created by boot.sh, owned by the UI user) */
+#define STATE_BAR "/var/local/vibe/state/soundbar"
 
 struct app {
      IDirectFB             *dfb;
@@ -156,6 +172,14 @@ struct app {
      int  arc;                     /* output is ARC and a device is present */
      double follow_until;          /* poll fast until then, after a key */
      double next_arc;
+     /* After a cold boot the TV finds the soundbar only ~30 s in, and then
+      * drains a long CEC queue for ~45 s more (docs/findings/06). Before it
+      * is found, volume keys would change the TV speakers' volume, so they
+      * are dropped while a soundbar is expected. After, systemserver
+      * forwards every press into that queue itself; we can only warn. */
+     int  bar_expected;            /* remembered: a soundbar is normally there */
+     int  bar_gone_polls;          /* consecutive polls with no ARC device */
+     double arc_since;             /* when the output last became the soundbar */
      int  page;                             /* settings page shown */
      int  val[MAX_ROWS], val_known;         /* its row values */
      int  vis_row[MAX_ROWS], nrows_vis;     /* rows this TV supports */
@@ -165,6 +189,8 @@ struct app {
      int  row, col;              /* Home focus */
      int  sel;                   /* list selection (quick, picture, rename) */
      int  rename_idx;            /* input being renamed (index into in[]) */
+     char kb_text[KB_MAX * 4 + 1];   /* keyboard text (UTF-8 if prefilled) */
+     int  kb_row, kb_col, kb_shift;
      int  top;                   /* first visible row of a long list */
      char toast[64];
      double toast_until, vol_until;
@@ -530,9 +556,23 @@ static void draw_list(struct app *a, cv_t *c, const char *title, int n,
 static const char *rename_input_label(struct app *a, int i) { return input_label(a, a->vis[i]); }
 static const char *rename_input_sub(struct app *a, int i)   { return a->in[a->vis[i]].id; }
 
+/* the current name is a custom one: neither the id nor a preset */
+static int custom_name(struct app *a)
+{
+     const char *cur = input_label(a, a->rename_idx);
+     if (!strcmp(cur, a->in[a->rename_idx].id))
+          return 0;
+     for (int i = 0; i < N_PRESETS; i++)
+          if (name_presets[i] && name_presets[i] != KB_ENTRY && !strcmp(cur, name_presets[i]))
+               return 0;
+     return 1;
+}
+
 static const char *preset_sub(struct app *a, int i)
 {
      const char *cur = input_label(a, a->rename_idx);
+     if (name_presets[i] == KB_ENTRY)
+          return custom_name(a) ? cur : NULL;
      const char *name = name_presets[i] ? name_presets[i] : a->in[a->rename_idx].id;
      return !strcmp(cur, name) ? "Current" : NULL;
 }
@@ -540,10 +580,93 @@ static const char *preset_sub(struct app *a, int i)
 static const char *preset_label(struct app *a, int i)
 {
      static char buf[64];
+     if (name_presets[i] == KB_ENTRY)
+          return "Custom name\xe2\x80\xa6";
      if (name_presets[i])
           return name_presets[i];
      snprintf(buf, sizeof(buf), "Default (%s)", a->in[a->rename_idx].id);
      return buf;
+}
+
+/* ---- on-screen keyboard */
+#define KB_GAP 10
+#define KB_KH  84
+
+/* the key under (row, col): a character, or for the last row an action */
+static int kb_action_at(int col)
+{
+     for (int i = KB_NACT - 1; i >= 0; i--)
+          if (col >= kb_act_col[i])
+               return i;
+     return 0;
+}
+
+static char kb_char(struct app *a, int row, int col)
+{
+     char ch = kb_chars[row][col];
+     return a->kb_shift && ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch;
+}
+
+static void draw_keyboard(struct app *a, cv_t *c)
+{
+     int x0 = r_x(a), y0 = 40, h = a->H - 80, rx = x0 + 28, rw = R_W - 56;
+     int kw = (rw - (KB_COLS - 1) * KB_GAP) / KB_COLS;
+     char title[96], count[16];
+
+     snprintf(title, sizeof(title), "Name %s", a->in[a->rename_idx].id);
+     sheet(a, c, x0, y0, R_W, h, title);
+
+     /* the text field, with a caret after the text */
+     int fy = y0 + 150, fh = 100;
+     int tw = text_width(a->f_bold, a->kb_text);
+     if (c) {
+          gfx_rrect(c, rx, fy, rw, fh, 24, K_CARD);
+          gfx_rrect_outline(c, rx, fy, rw, fh, 24, 2, K_ACCENT_L);
+          gfx_rrect(c, rx + 36 + tw + 4, fy + 26, 4, fh - 52, 2, K_ACCENT_R);
+     } else {
+          if (a->kb_text[0])
+               text_v(a, a->f_bold, rx + 36, fy, fh, K_TEXT, a->kb_text, -1);
+          else
+               text_v(a, a->f_item, rx + 48, fy, fh, K_TEXT3, a->in[a->rename_idx].id, -1);
+          snprintf(count, sizeof(count), "%d/%d", (int)strlen(a->kb_text), KB_MAX);
+          text_v(a, a->f_small, rx + rw - 32, fy, fh, K_TEXT3, count, 1);
+     }
+
+     /* the keys */
+     int gy = fy + fh + 48;
+     for (int row = 0; row < KB_ROWS; row++) {
+          int y = gy + row * (KB_KH + KB_GAP);
+          if (row < 4) {
+               for (int col = 0; col < KB_COLS; col++) {
+                    int x = rx + col * (kw + KB_GAP);
+                    int f = row == a->kb_row && col == a->kb_col;
+                    if (c) {
+                         if (f) focus_fill(c, x, y, kw, KB_KH, 16);
+                         else gfx_rrect(c, x, y, kw, KB_KH, 16, K_CARD);
+                    } else {
+                         char s[2] = { kb_char(a, row, col), 0 };
+                         text_v(a, a->f_bold, x + kw / 2, y, KB_KH, K_TEXT, s, 0);
+                    }
+               }
+          } else {
+               int cur = kb_action_at(a->kb_col);
+               for (int i = 0; i < KB_NACT; i++) {
+                    int x = rx + kb_act_col[i] * (kw + KB_GAP);
+                    int w = kb_act_w[i] * kw + (kb_act_w[i] - 1) * KB_GAP;
+                    int f = row == a->kb_row && i == cur;
+                    int on = i == KB_SHIFT && a->kb_shift;
+                    if (c) {
+                         if (f) focus_fill(c, x, y, w, KB_KH, 16);
+                         else gfx_rrect(c, x, y, w, KB_KH, 16, on ? 0xff2c3a66 : K_CARD);
+                    } else {
+                         text_v(a, a->f_small, x + w / 2, y, KB_KH,
+                                on && !f ? K_ACCENT_L : K_TEXT, kb_act_name[i], 0);
+                    }
+               }
+          }
+     }
+     static const char *const hh[] = { "OK", "Type", "0-9", "Digits", "BACK", "Cancel" };
+     hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, 3);
 }
 
 /* ---- HUDs */
@@ -594,6 +717,7 @@ static void draw_screens(struct app *a, cv_t *c, double now)
           draw_list(a, c, t, N_PRESETS, preset_label, preset_sub);
           break;
      }
+     case S_KEYBOARD:     draw_keyboard(a, c); break;
      case S_NONE:         break;
      }
      if (now < a->toast_until)
@@ -663,15 +787,59 @@ static void poll_inputs(struct app *a)
 }
 
 
-static void poll_arc(struct app *a)
+static int read_bar_expected(void)
+{
+     int v = 0;
+     FILE *f = fopen(STATE_BAR, "r");
+     if (f) {
+          if (fscanf(f, "%d", &v) != 1)
+               v = 0;
+          fclose(f);
+     }
+     return v == 1;
+}
+
+static void set_bar_expected(struct app *a, int v, const char *why)
+{
+     if (a->bar_expected == v)
+          return;
+     a->bar_expected = v;
+     printf("soundbar expected: %d (%s)\n", v, why);
+     FILE *f = fopen(STATE_BAR ".new", "w");
+     if (!f) {
+          perror("vibe-ui: " STATE_BAR ".new");
+          return;
+     }
+     fprintf(f, "%d\n", v);
+     if (fclose(f) == 0)
+          rename(STATE_BAR ".new", STATE_BAR);
+}
+
+/* every 2 s */
+static void poll_arc(struct app *a, double now)
 {
      int spk = 0, dev = 0;
      biz_get_int(BIZ_KEY_SPEAKER, &spk);
      biz_get_int(BIZ_KEY_ARC_DEVICE, &dev);
      int arc = spk == 2 && dev == 1;
      if (arc != a->arc) {
-          printf("output: %s\n", arc ? "soundbar (ARC)" : "TV");
+          printf("output: %s at %.1f\n", arc ? "soundbar (ARC)" : "TV", now);
           a->arc = arc;
+          if (arc)
+               a->arc_since = now;
+     }
+     if (arc) {
+          set_bar_expected(a, 1, "soundbar connected");
+          a->bar_gone_polls = 0;
+     } else if (dev == 1 && spk != 2) {
+          /* a soundbar is there and the owner chose another output */
+          set_bar_expected(a, 0, "other output chosen");
+     } else if (dev == 0 && now > 120) {
+          /* after boot, a minute with no ARC device: unplugged */
+          if (++a->bar_gone_polls >= 30)
+               set_bar_expected(a, 0, "no ARC device for a minute");
+     } else {
+          a->bar_gone_polls = 0;
      }
 }
 
@@ -750,6 +918,14 @@ static void open_screen(struct app *a, enum screen s, double now)
           a->sel = 0;
      } else if (s == S_RENAME_NAME) {
           a->sel = 0;
+     } else if (s == S_KEYBOARD) {
+          /* start from the current name if it is a custom one */
+          a->kb_text[0] = 0;
+          if (custom_name(a))
+               snprintf(a->kb_text, sizeof(a->kb_text), "%s", input_label(a, a->rename_idx));
+          a->kb_shift = !a->kb_text[0];
+          a->kb_row = 1;
+          a->kb_col = 0;
      }
 }
 
@@ -876,6 +1052,106 @@ static void key_settings(struct app *a, int k, int repeat, double now)
      a->dirty = 1;
 }
 
+static void do_rename(struct app *a, const char *name, double now)
+{
+     const char *id = a->in[a->rename_idx].id;
+     int r = biz_rename_input(id, name);
+     char msg[64];
+     printf("rename %s -> '%s' r=%d\n", id, name, r);
+     snprintf(msg, sizeof(msg), "%s: %s", id, name);
+     toast(a, msg, now);
+     a->next_inputs = now + 0.5;
+     open_screen(a, S_RENAME_INPUT, now);
+}
+
+static void kb_type(struct app *a, char ch)
+{
+     size_t n = strlen(a->kb_text);
+     if (n >= KB_MAX)
+          return;
+     a->kb_text[n] = ch;
+     a->kb_text[n + 1] = 0;
+     if (ch >= 'A' && ch <= 'Z')
+          a->kb_shift = 0;              /* shift is for one letter */
+}
+
+static void key_keyboard(struct app *a, int k, double now)
+{
+     int last = KB_ROWS - 1;
+     switch (k) {
+     case DIKS_CURSOR_UP:
+          if (a->kb_row > 0) {
+               /* from the action row, land on the action's first column */
+               if (a->kb_row == last)
+                    a->kb_col = kb_act_col[kb_action_at(a->kb_col)];
+               a->kb_row--;
+          }
+          break;
+     case DIKS_CURSOR_DOWN:
+          if (a->kb_row < last) a->kb_row++;
+          break;
+     case DIKS_CURSOR_LEFT:
+          if (a->kb_row == last) {
+               int i = kb_action_at(a->kb_col);
+               if (i > 0) a->kb_col = kb_act_col[i - 1];
+          } else if (a->kb_col > 0) {
+               a->kb_col--;
+          }
+          break;
+     case DIKS_CURSOR_RIGHT:
+          if (a->kb_row == last) {
+               int i = kb_action_at(a->kb_col);
+               if (i < KB_NACT - 1) a->kb_col = kb_act_col[i + 1];
+          } else if (a->kb_col < KB_COLS - 1) {
+               a->kb_col++;
+          }
+          break;
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
+          if (a->kb_row < last) {
+               kb_type(a, kb_char(a, a->kb_row, a->kb_col));
+               break;
+          }
+          switch (kb_action_at(a->kb_col)) {
+          case KB_SHIFT: a->kb_shift = !a->kb_shift; break;
+          case KB_SPACE:
+               if (a->kb_text[0]) kb_type(a, ' ');
+               break;
+          case KB_DELETE: {
+               size_t n = strlen(a->kb_text);
+               /* drop one UTF-8 character (a prefilled name may have any) */
+               while (n > 0 && ((unsigned char)a->kb_text[--n] & 0xc0) == 0x80)
+                    ;
+               a->kb_text[n] = 0;
+               if (!n) a->kb_shift = 1;
+               break;
+          }
+          case KB_DONE: {
+               size_t n = strlen(a->kb_text);
+               while (n > 0 && a->kb_text[n - 1] == ' ')
+                    a->kb_text[--n] = 0;
+               /* nothing typed: back to the input's own name */
+               do_rename(a, n ? a->kb_text : a->in[a->rename_idx].id, now);
+               return;
+          }
+          }
+          break;
+     case DIKS_0: case DIKS_1: case DIKS_2: case DIKS_3: case DIKS_4:
+     case DIKS_5: case DIKS_6: case DIKS_7: case DIKS_8: case DIKS_9:
+          kb_type(a, '0' + (k - DIKS_0));
+          break;
+     case DIKS_BACK:
+          open_screen(a, S_RENAME_NAME, now);
+          a->sel = 1;                   /* back on "Custom name..." */
+          return;
+     case DIKS_EXIT:
+          a->screen = S_NONE;
+          break;
+     default:
+          return;
+     }
+     a->dirty = 1;
+}
+
 static void key_rename(struct app *a, int k, double now)
 {
      int n = a->screen == S_RENAME_INPUT ? a->nvis : N_PRESETS;
@@ -888,16 +1164,11 @@ static void key_rename(struct app *a, int k, double now)
                     a->rename_idx = a->vis[a->sel];
                     open_screen(a, S_RENAME_NAME, now);
                }
+          } else if (name_presets[a->sel] == KB_ENTRY) {
+               open_screen(a, S_KEYBOARD, now);
           } else {
                const char *id = a->in[a->rename_idx].id;
-               const char *name = name_presets[a->sel] ? name_presets[a->sel] : id;
-               int r = biz_rename_input(id, name);
-               char msg[64];
-               printf("rename %s -> '%s' r=%d\n", id, name, r);
-               snprintf(msg, sizeof(msg), "%s: %s", id, name);
-               toast(a, msg, now);
-               a->next_inputs = now + 0.5;
-               open_screen(a, S_RENAME_INPUT, now);
+               do_rename(a, name_presets[a->sel] ? name_presets[a->sel] : id, now);
           }
           break;
      case DIKS_BACK:
@@ -926,12 +1197,25 @@ static void on_key(struct app *a, int k, int repeat, double now)
           /* nothing else acts on these with the stock page blanked; the stock
            * UI used to call modeljs.sound.setMainVolume */
           int r;
+          if (!a->arc && a->bar_expected) {
+               /* the soundbar is not found yet (after a cold boot ~30 s,
+                * after standby a moment): the key would only change the TV
+                * speakers' volume, and is not forwarded to the soundbar */
+               printf("volume key dropped: soundbar not connected yet\n");
+               toast(a, "Sound system connecting\xe2\x80\xa6", now);
+               return;
+          }
           if (a->arc) {
                /* the system sends the key to the soundbar; show what it
                 * reports, polling fast for a moment */
                a->follow_until = now + 1.5;
                a->next_vol = now + 0.1;
                r = 0;
+               /* found early in a boot: the TV's CEC queue is still long,
+                * presses reach the soundbar late (and cannot be held back:
+                * systemserver queues them before we see them) */
+               if (a->arc_since < 150 && now - a->arc_since < 45)
+                    toast(a, "Sound system starting, volume may lag", now);
           } else if (k == DIKS_MUTE) {
                a->mute = !a->mute;
                r = biz_set_int(BIZ_KEY_MUTE, a->mute);
@@ -983,6 +1267,7 @@ static void on_key(struct app *a, int k, int repeat, double now)
      case S_SETTINGS:     key_settings(a, k, repeat, now); break;
      case S_RENAME_INPUT:
      case S_RENAME_NAME:  key_rename(a, k, now); break;
+     case S_KEYBOARD:     key_keyboard(a, k, now); break;
      case S_NONE:         break;
      }
 }
@@ -1168,7 +1453,9 @@ int main(int argc, char **argv)
           printf("gui.loop.finished was %d, set 1 -> r=%d\n", v, r);
      }
      poll_inputs(a);
-     poll_arc(a);
+     a->bar_expected = read_bar_expected();
+     printf("soundbar expected: %d (remembered)\n", a->bar_expected);
+     poll_arc(a, t0);
      poll_volume(a, t0);
      printf("model: %d inputs, current %s, volume %d, mute %d (%.0f ms)\n",
             a->nin, a->cur, a->vol, a->mute, (vibe_now_s() - t0) * 1000);
@@ -1242,7 +1529,7 @@ int main(int argc, char **argv)
           }
 
           if (now >= a->next_arc) {
-               poll_arc(a);
+               poll_arc(a, now);
                a->next_arc = now + 2.0;
           }
           if (now >= a->next_vol) {
