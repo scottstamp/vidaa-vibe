@@ -710,6 +710,34 @@ Way back: `touch /var/local/vibe/wait-engine` brings back the old wait for
 `hisenseUI`. It only matters at boot, so it takes effect at the next
 reboot.
 
+## More settings: HDMI format, picture reset, no-signal standby
+
+From the stock bundle and `libcobalt.so` (research agent, checked by hand
+where it matters), 2026-11-25:
+
+| Setting | Stock JS call | Model | Values | Shown when |
+| --- | --- | --- | --- | --- |
+| HDMI format (Game page) | `video.setHdmiFormat` → `modeljs.video.setHdmiSignalFormat` | `kilby.sl2.i32.video.enum.hdmi.signal.format` | 0 Standard, 1 Enhanced, 2 Auto (this TV: 1) | `video.4k.mode.supported` = 1; the stock UI also greys it out unless an HDMI input is showing: one value, not per input |
+| Reset picture mode (Picture page) | `picture.resetDefaultPictureSettings` → `modeljs.video.ResetDefaultPictureSettings([1])` | action `kilby.sl2.action.video.reset.picture.settings` `["1"]` | — | always; the stock UI asks to confirm. Not `...reset.picture.settings.shopmode.onTimer` (store mode) |
+| No-signal standby (Sleep page) | `system.setAutoStandbyNoSignal` → `modeljs.system.setAutoStandby` | `kilby.sl2.i32.system.nosignal.autostandby` | 0 Off, 1 "15 minutes" (this TV: 1) | `system.display.panel.type` = 0 (this TV: 0) |
+
+Like the sleep timer, no-signal standby is counted by the stock UI, not by
+`tvmain`: 14 minutes without signal on panel type 0 (`noSignalFunTime`,
+LiveTV.js), then the standby dialog (60 s), then `SwitchOffTv`. The stock
+UI's switch-off reasons (`app.js` `MODELJS_DEFINE`): `SWITCH_OFF_TV_TIMER`
+2 for the sleep timer, `SWITCH_OFF_TV_AUTO` 3 for no-signal and auto sleep,
+`SWITCH_OFF_TV_CURTAIN` 4. vibe-ui's sleep timer had used 4 (it worked);
+it now uses 2, and no-signal standby 3.
+
+vibe-ui: no-signal standby uses the "No signal" tracking (current input,
+not the tuner): after 14 minutes it starts the same last-minute countdown
+as the sleep timer ("No signal: off in N s"); a key restarts the 14
+minutes ("Staying on"), a signal or another input cancels it. Picture reset
+asks for a second OK within 4 s. Settings rows shrink to fit (Picture has 7
+now). Auto sleep (`timerfunctions.auto.sleep`, 3 h / 4 h, also counted by
+the UI) is not offered. Not yet tested on the TV: the no-signal countdown
+end to end, the picture reset, an HDMI format change.
+
 ## To revisit: unused remote buttons
 
 The shortcut button next to MENU, MTS, CC, the mic button, the dash key and
