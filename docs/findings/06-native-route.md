@@ -949,7 +949,10 @@ the uid rules with a live process (the blocked services are dead within
 13 s). Building the chain took about 3 s at boot (33 `iptables` runs). It is now
 one `iptables-restore --noflush` commit, chain and hook together (the TV's
 `iptables` is multi-call: `exec -a iptables-restore`); 0.08 s from script
-start on an idle TV. Not yet measured at boot.
+start on an idle TV. At boot (2026-11-25): `debloat.sh` at 9.27 s, chain
+hooked at 9.71 s (0.44 s; was 2.9 s). That boot ran about a second later
+overall (`boot.sh` 8.49 s, `hisenseUI` seen 9.86 s, `vibe-ui` 9.95 s);
+boot-to-boot spread so far is about 1 s.
 
 ### Way back (written before the change)
 
