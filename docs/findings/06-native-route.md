@@ -839,13 +839,49 @@ After a power cut or a reboot, expect about 30 s before CEC works. The
 syslog rotated past the boot lines by 35 s on that boot: CEC traffic fills
 both 512 KB files fast, so read it early.
 
+From standby the soundbar connects at once and responds within a couple of
+seconds of wake (owner), so this only matters after a cold boot. Decision
+(owner): leave `tvmain` alone; replacing it, even if possible, risks a
+state we cannot recover from.
+
+### Who wiped the block, and the move to the nat table
+
+The stock firewall is four scripts in `/usr/local/scripts`, all on the
+verified partition, all filter-table only:
+
+- `security-firewall-start.sh` (run by `start-security.sh` at boot):
+  `iptables -F`, `iptables -X`, recreates the four `FIREWALL_*` chains,
+  hooks `INPUT` (and `OUTPUT` when the EULA is off), then runs
+  `firewall-init-subrule.sh` in the background.
+- `firewall-eulaon.sh` / `firewall-eulaoff.sh` (run by `tvmain`, and by
+  `euladpp-reset.sh`): `iptables -F OUTPUT`, `iptables -F INPUT`, re-add the
+  `FIREWALL_IN_*` jump. They take `/tmp/firewall.lock` and log to syslog with
+  tag `firewall`.
+
+Any of them wipes a filter-table `VIBE_OUT` hook (seen once at about 15 s
+of boot), and the `INPUT` flush also drops the hook's SSH accept rule, which
+the hook puts back within 15–30 s (`otaTest.sh`'s loop; open SSH sessions
+survive through the `ESTABLISHED` accept in `FIREWALL_IN_*`).
+
+None of them touches the nat table, so `VIBE_OUT` now lives there: nat
+`OUTPUT` → `VIBE_OUT`, which REDIRECTs the matching DNS queries (udp/tcp 53,
+same wire-format label match) and all non-loopback tcp/udp of the blocked
+uids to local port 9, where nothing listens, so they fail at once. Tested
+live: `api.hismarttv.com` and `geo-bas.vidaahub.com` fail in under a second,
+`github.com` resolves; after `iptables -F OUTPUT` (what `firewall-eulaon.sh`
+does to OUTPUT) the block still holds. The nat table was empty before, the
+TV has no global IPv6 address, REDIRECT is in
+`/proc/net/ip_tables_targets`. Not yet tested: the uid rules with a live
+process (the blocked services are not running), and a full boot.
+
 ### Way back (written before the change)
 
 - Everything is in memory. A reboot without `debloat.sh` brings every
   service and the stock firewall back.
 - `touch /var/local/vibe/debloat.off`: the running script removes
   `VIBE_OUT` within 60 s and exits; services come back at the next reboot.
-- Firewall only, at once: `iptables -D OUTPUT -j VIBE_OUT`.
+- Firewall only, at once: `iptables -t nat -D OUTPUT -j VIBE_OUT` (since the
+  move to the nat table; the first version used the filter table).
 - One service back: take it out of `STOP` (and its uid out of
   `BLOCK_UIDS` if it needs the network), deploy, reboot.
 - The stock UI's pieces (`app_man`, `apmbond`, `hisenseUI`,

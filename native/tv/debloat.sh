@@ -19,14 +19,20 @@
 #   1b. once vibe-ui runs, stops the stock UI's own pieces (STOP_UI:
 #      app_man, apmbond, hisenseUI, LauncherService); after that, anything
 #      frozen is killed, since nothing respawns any more.
-#   2. iptables chain VIBE_OUT, first in OUTPUT:
-#      - refuses DNS queries (udp and tcp 53) for any name under the labels
-#        in BLOCK_LABELS, matched on the DNS wire format (length byte +
-#        label), so every subdomain is covered, including names the services
-#        build at run time;
-#      - refuses all non-loopback traffic from the uids in BLOCK_UIDS (the
-#        Hisense updaters and reporters), in case they use fixed addresses.
+#   2. iptables chain VIBE_OUT in the nat table, first in nat OUTPUT:
+#      - sends DNS queries (udp and tcp 53) for any name under the labels in
+#        BLOCK_LABELS, matched on the DNS wire format (length byte + label),
+#        to local port 9, where nothing listens, so they fail at once
+#        ("connection refused"); every subdomain is covered, including names
+#        the services build at run time;
+#      - does the same with all non-loopback tcp/udp from the uids in
+#        BLOCK_UIDS (the Hisense updaters and reporters), in case they use
+#        fixed addresses.
 #      Everything else, third-party services included, is untouched.
+#      Why nat: the vendor's firewall scripts (security-firewall-start.sh,
+#      firewall-eulaon.sh, run by start-security.sh and tvmain) flush the
+#      filter table, and once did so 6 s after we had set our rules there.
+#      They never touch nat. The chain is still checked on every pass.
 #
 # To bring a service back: take it out of STOP (and its uid out of
 # BLOCK_UIDS if it needs the network), deploy, reboot. Section names and
@@ -67,33 +73,43 @@ BLOCK_UIDS="304 305 306 312 326 337 338 339 1032"
 
 off() { [ -f $V/debloat.off ]; }
 
+NAT="iptables -t nat"
+DEAD_PORT=9     # nothing listens here: redirected traffic is refused at once
+
 fw_remove() {
+    while $NAT -D OUTPUT -j VIBE_OUT 2>/dev/null; do :; done
+    $NAT -F VIBE_OUT 2>/dev/null
+    $NAT -X VIBE_OUT 2>/dev/null
+    # the filter-table chain of the first version, if a run left one
     while iptables -D OUTPUT -j VIBE_OUT 2>/dev/null; do :; done
     iptables -F VIBE_OUT 2>/dev/null
     iptables -X VIBE_OUT 2>/dev/null
 }
 
 fw_build() {
-    iptables -N VIBE_OUT 2>/dev/null
-    iptables -F VIBE_OUT
+    $NAT -N VIBE_OUT 2>/dev/null
+    $NAT -F VIBE_OUT
     for l in $BLOCK_LABELS; do
         hex="|$(printf '%02x' ${#l})|$l|"
         for p in udp tcp; do
-            iptables -A VIBE_OUT -p $p --dport 53 -m string --algo bm --icase \
-                --hex-string "$hex" -j REJECT || echo "rule failed: dns $p $l"
+            $NAT -A VIBE_OUT -p $p --dport 53 -m string --algo bm --icase \
+                --hex-string "$hex" -j REDIRECT --to-ports $DEAD_PORT \
+                || echo "rule failed: dns $p $l"
         done
     done
     for u in $BLOCK_UIDS; do
-        iptables -A VIBE_OUT ! -o lo -m owner --uid-owner $u -j REJECT \
-            || echo "rule failed: uid $u"
+        for p in udp tcp; do
+            $NAT -A VIBE_OUT -p $p ! -o lo -m owner --uid-owner $u \
+                -j REDIRECT --to-ports $DEAD_PORT || echo "rule failed: uid $u $p"
+        done
     done
-    echo "VIBE_OUT built: $(iptables -S VIBE_OUT | $BB wc -l) lines"
+    echo "VIBE_OUT (nat) built: $($NAT -S VIBE_OUT | $BB wc -l) lines"
 }
 
 fw_ensure() {
-    iptables -C OUTPUT -j VIBE_OUT 2>/dev/null && return
+    $NAT -C OUTPUT -j VIBE_OUT 2>/dev/null && return
     fw_build
-    iptables -I OUTPUT 1 -j VIBE_OUT && echo "VIBE_OUT hooked into OUTPUT at uptime $(up)"
+    $NAT -I OUTPUT 1 -j VIBE_OUT && echo "VIBE_OUT hooked into nat OUTPUT at uptime $(up)"
 }
 
 # /proc/<pid>/status starts "Name:<tab><name>", then (Umask, then) "State:".
@@ -163,14 +179,16 @@ ui_pass() {
     scan_kill "app_man"
     sleep 2
     scan_kill "$STOP_UI"
-    echo "uptime $(up) stock UI stopped:$killed"
-    reap
+    [ -n "$killed" ] && { echo "uptime $(up) stock UI stopped:$killed"; reap; }
     UI_DONE=1
     ALL="$ALL $STOP_UI"
     for n in $STOP_UI; do SEEN="$SEEN$n "; done
 }
 
 if off; then echo "debloat.off present, not running"; fw_remove; exit 0; fi
+# the filter-table chain of the first version, if a run left one
+while iptables -D OUTPUT -j VIBE_OUT 2>/dev/null; do :; done
+iptables -F VIBE_OUT 2>/dev/null; iptables -X VIBE_OUT 2>/dev/null
 fw_ensure
 while :; do
     if off; then echo "debloat.off seen at uptime $(up), removing VIBE_OUT, exiting"; fw_remove; exit 0; fi
