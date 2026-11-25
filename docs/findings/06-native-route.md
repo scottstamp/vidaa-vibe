@@ -754,9 +754,15 @@ Test (2026-11-25): `app_man` (pid 724) frozen with SIGSTOP for 20 s
 (uptime 98.6–118.6 s) while the owner pressed HOME, UP, DOWN and BACK.
 Every key reached `vibe-ui` and the menu reacted normally (owner). So keys go
 from `systemserver` through DirectFB to the focused window without `app_man`,
-despite its `input_event_source = inject` setting. Not yet tested without
-`app_man`: standby and wake, and what a kill does to its children
-(`hisenseUI`, `apmbond`, `LauncherService`, `websdk`).
+despite its `input_event_source = inject` setting. Second test: `app_man` frozen
+for 40 s (uptime 200–240 s) while the owner pressed POWER, waited, pressed
+POWER again. `system.enum.screen.state` went 1 → 0 at about 212 s and back
+to 1 at about 227 s; dmesg shows the panel's STR resume at 224.3 s; the owner
+saw standby and wake work. So standby and wake do not need `app_man` either
+(`vibe-ui` leaves POWER to the system, with `gui.loop.finished` = 1). Script:
+`research/scratch/amstop.sh`, log `/var/local/vibe/amstop.log`. Not yet
+tested: what a kill does to its children (`hisenseUI`, `apmbond`,
+`LauncherService`, `websdk`), and whether anything restarts it.
 
 ### Way back (written before the change)
 
