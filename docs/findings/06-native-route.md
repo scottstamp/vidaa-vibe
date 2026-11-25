@@ -634,6 +634,32 @@ off", `switch.off.tv [4] -> r=1`, screen off, POWER woke it; run 2, a key
 in the last minute cancelled it and the key read 0 (owner saw the
 countdown). (`arg[0]=4` in the log is printed by `libbizAgent.so` itself.)
 
+## Remote navigation to an HDMI-CEC device (research, 2026-11-25)
+
+With the stock UI, UP/DOWN/LEFT/RIGHT/OK/BACK on an HDMI input with no menu
+reached the source device (the Chromecast on HDMI2) this way: systemserver's
+key dispatcher offers each non-hot key to the APM "launcher" app (the stock
+engine); its JS (88.js liveTV.vue) answered "not handled" when no menu was
+open, `cec.functionality` was on and the source was HDMI; the dispatcher
+then passed the key to its CEC component (`CecClient`, app-internal-cec),
+which calls the model action `kilby.sl2.cec.send.remote.key` with three
+decimal strings: syskey, subsystem 0, key state. tvmain sends <User Control
+Pressed/Released> to the device it tracks as connected
+(`m_addressCECDeviceConnected`); `CecClient` only does so when
+`kilby.sl2.i32.cec.device.active.for.remote` = 1 and
+`...cec.device.remote.operation.mode` = 0. With the stock engine gone,
+nothing answers: the syslog shows the dispatcher "Waiting for the response
+of launcher's key event" about 1 s per key, and nothing reaches CEC.
+Syskeys (systemserver's DFB2SysKey map, from disassembly): OK 23, UP 24,
+DOWN 25, LEFT 26, RIGHT 27, BACK 76, EXIT 173. Key states from tvmain's
+names `lo::port::KEY_SINGLE`, `KEY_AUTOREP`, `KEY_RELEASED`; the values 1,
+2 and 8 are inferred (bit flags), not yet tested. Volume goes another way
+(`...cec.send.remote.audio.key`, the hot-key path) and is not affected.
+Plan: vibe-ui calls the action itself for those keys when no panel is open
+and the current input is HDMI with the device active for remote.
+(Research workflow stopped after its mapping stage to save tokens; the
+mapping agents agreed on the action.)
+
 ## Input settings: hiding inputs
 
 Home's last settings card is "Input settings" (was "Rename inputs"). It
