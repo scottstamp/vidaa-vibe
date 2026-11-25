@@ -1,0 +1,8 @@
+# Files that run or are read on the TV must stay LF on every checkout
+# (core.autocrlf=true here turns them into CRLF otherwise; see 05-traps).
+*.sh        text eol=lf
+*.c         text eol=lf
+*.h         text eol=lf
+*.py        text eol=lf
+native/**   text eol=lf
+server/tv   text eol=lf
