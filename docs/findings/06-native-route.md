@@ -828,8 +828,16 @@ On the boot of 2026-11-25 09:37 (debloat on):
 
 So the delay is the staggered hotplug plus a CEC send queue flooded by the
 soundbar's retries, behind an eARC wait that this soundbar never satisfies.
-The queue also explains the owner's late, replayed volume presses. Next
-test: eARC off (`sound.earc.switch.value` 0, Sound → eARC in vibe-ui).
+The queue also explains the owner's late, replayed volume presses. Test with eARC off (`sound.earc.switch.value` read back 0, set by the owner
+in vibe-ui's Sound page), next boot: no change. `arcdev.exist` became 1
+between 26.6 and 31.1 s, as before, and at 34.9 s the send queue still held
+123 messages, with the owner's volume presses (`<User Control Pressed>`
+0x44, `<User Control Released>` 0x45) queued behind them. So the eARC wait
+is not the cause; the staggered per-port hotplug and the flooded send queue
+are, and both are inside `tvmain` (verified partition, not changeable).
+After a power cut or a reboot, expect about 30 s before CEC works. The
+syslog rotated past the boot lines by 35 s on that boot: CEC traffic fills
+both 512 KB files fast, so read it early.
 
 ### Way back (written before the change)
 
