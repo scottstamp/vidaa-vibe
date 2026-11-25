@@ -706,9 +706,9 @@ its window). `vibe-ui` takes focus back if the engine's window takes it.
 Unknown until a boot: whether the engine starting after us disturbs the
 layer or our window.
 
-Way back: `touch /var/local/vibe/wait-engine` (the old wait for
-`hisenseUI`), then `restart-ui.sh` has no effect on this (it only matters
-at boot): reboot.
+Way back: `touch /var/local/vibe/wait-engine` brings back the old wait for
+`hisenseUI`. It only matters at boot, so it takes effect at the next
+reboot.
 
 ## To revisit: unused remote buttons
 
