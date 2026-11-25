@@ -9,37 +9,46 @@ uint32_t gfx_with_alpha(uint32_t c, int a)
      return (c & 0x00ffffff) | (uint32_t)(a < 0 ? 0 : a > 255 ? 255 : a) << 24;
 }
 
+/* x / 255 for 0 <= x <= 65535, exact, without a division */
+static inline int div255(int x)
+{
+     return (x + 1 + (x >> 8)) >> 8;
+}
+
 uint32_t gfx_mix(uint32_t c0, uint32_t c1, int t)
 {
      uint32_t out = 0;
      for (int s = 0; s < 32; s += 8) {
           int a = c0 >> s & 0xff, b = c1 >> s & 0xff;
-          out |= (uint32_t)((a * (255 - t) + b * t) / 255) << s;
+          out |= (uint32_t)div255(a * (255 - t) + b * t) << s;
      }
      return out;
 }
 
-/* composite src (with extra coverage cov 0..255) over *d, non-premultiplied */
+/* composite src (with extra coverage cov 0..255) over *d, non-premultiplied.
+ * Hot: one division per blended pixel (was five; the keyboard's frame went
+ * from ~370 ms of shapes). */
 static inline void over(uint32_t *d, uint32_t src, int cov)
 {
-     int sa = (int)(src >> 24) * cov / 255;
+     int sa = div255((int)(src >> 24) * cov);
      if (sa <= 0)
           return;
      uint32_t dst = *d;
      int da = dst >> 24;
      if (sa >= 255 || da == 0) {
           *d = (src & 0x00ffffff) | (uint32_t)sa << 24;
-          if (sa >= 255 || da == 0)
-               return;
+          return;
      }
      /* out_a = sa + da(1-sa); out_c = (sc sa + dc da (1-sa)) / out_a */
-     int inv = 255 - sa;
-     int oa = sa + da * inv / 255;
-     int wd = da * inv / 255;
+     int wd = div255(da * (255 - sa));
+     int oa = sa + wd;
+     /* sc*sa + dc*wd <= 255*oa, so the product stays below 2^24 */
+     uint32_t k = (1u << 16) / (uint32_t)oa;
      uint32_t r = 0;
      for (int s = 0; s < 24; s += 8) {
-          int sc = src >> s & 0xff, dc = dst >> s & 0xff;
-          r |= (uint32_t)((sc * sa + dc * wd) / oa) << s;
+          uint32_t sc = src >> s & 0xff, dc = dst >> s & 0xff;
+          uint32_t v = ((sc * sa + dc * wd) * k + 0x8000) >> 16;
+          r |= (v > 255 ? 255 : v) << s;
      }
      *d = r | (uint32_t)oa << 24;
 }
@@ -113,14 +122,51 @@ void gfx_rrect_hgrad(struct canvas *c, int x, int y, int w, int h, int r,
 
 void gfx_shadow(struct canvas *c, int x, int y, int w, int h, int r, int spread, uint32_t colour)
 {
-     /* concentric rings, alpha falling off quadratically */
+     /* Alpha falls off quadratically with the distance d from the rounded
+      * rect, out to spread: a0 (1 - d/spread)^2 / 3, the curve the old
+      * concentric-ring version drew one ring per pixel of spread. One pass
+      * over the shadow band, the rect's inside skipped. */
+     if (w <= 0 || h <= 0 || spread <= 0)
+          return;
+     if (r * 2 > w) r = w / 2;
+     if (r * 2 > h) r = h / 2;
      int a0 = colour >> 24;
-     for (int i = spread; i >= 1; i--) {
-          float t = (float)i / (float)spread;            /* 1 outside .. 0 inside */
-          int a = (int)(a0 * (1.0f - t) * (1.0f - t) / 3.0f);
-          if (a <= 0)
-               continue;
-          gfx_rrect_outline(c, x - i, y - i, w + 2 * i, h + 2 * i, r + i, 1, gfx_with_alpha(colour, a));
+     int X0 = x - spread < 0 ? 0 : x - spread, Y0 = y - spread < 0 ? 0 : y - spread;
+     int X1 = x + w + spread > c->w ? c->w : x + w + spread;
+     int Y1 = y + h + spread > c->h ? c->h : y + h + spread;
+     float lx = x + r, rx = x + w - r, ty = y + r, by = y + h - r;
+     /* alpha by whole-pixel distance, computed once */
+     int lut[256];
+     int n = spread < 255 ? spread : 255;
+     for (int i = 0; i <= n; i++) {
+          float t = (float)i / (float)spread;
+          lut[i] = (int)(a0 * (1.0f - t) * (1.0f - t) / 3.0f);
+     }
+     uint32_t rgb = colour & 0x00ffffff;
+     for (int py = Y0; py < Y1; py++) {
+          uint32_t *row = c->px + (size_t)py * c->pitch;
+          float fy = py + 0.5f;
+          float dy = fy < ty ? ty - fy : fy > by ? fy - by : 0.0f;
+          /* inside the rect on this row: [skip0, skip1) */
+          int skip0 = -1, skip1 = -1;       /* -1: nothing to skip */
+          if (py >= y && py < y + h) {
+               if (py >= y + r && py < y + h - r) { skip0 = x; skip1 = x + w; }
+               else { skip0 = x + r; skip1 = x + w - r; }
+               if (skip1 <= skip0) skip0 = skip1 = -1;
+          }
+          for (int px = X0; px < X1; px++) {
+               if (px == skip0) { px = skip1 - 1; continue; }   /* skip1 > skip0 */
+               float fx = px + 0.5f;
+               float dx = fx < lx ? lx - fx : fx > rx ? fx - rx : 0.0f;
+               float d = (dx == 0.0f) ? dy - r : (dy == 0.0f) ? dx - r : sqrtf(dx * dx + dy * dy) - r;
+               if (d < 0.5f)
+                    continue;               /* inside the rounded rect */
+               int i = (int)(d + 0.5f);
+               if (i > n)
+                    continue;
+               if (lut[i] > 0)
+                    over(&row[px], rgb | (uint32_t)lut[i] << 24, 255);
+          }
      }
 }
 

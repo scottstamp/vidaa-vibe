@@ -157,6 +157,7 @@ struct app {
      IDirectFBEventBuffer  *events;
      IDirectFBFont         *f_title, *f_head, *f_item, *f_bold, *f_small, *f_tiny;
      int W, H;
+     uint32_t *back;              /* W*H ARGB drawing buffer in RAM */
 
      /* model state */
      struct biz_input in[BIZ_MAX_INPUTS];
@@ -732,16 +733,26 @@ static void redraw(struct app *a, double now)
      int pitch = 0;
      double t0 = vibe_now_s();
 
-     if (a->s->Lock(a->s, DSLF_WRITE, &ptr, &pitch) == DFB_OK && ptr) {
-          struct canvas c = { ptr, pitch / 4, a->W, a->H };
+     /* Shapes are drawn in ordinary RAM, then copied to the surface in one
+      * sequential write pass. Blending reads every pixel, and the locked
+      * surface is display memory, slow to read: drawing the keyboard there
+      * took ~260 ms, in RAM ~60 ms (native/tools/gfx_bench.c). */
+     if (!a->back)
+          a->back = malloc((size_t)a->W * a->H * 4);
+     if (a->back && a->s->Lock(a->s, DSLF_WRITE, &ptr, &pitch) == DFB_OK && ptr) {
+          struct canvas c = { a->back, a->W, a->W, a->H };
           gfx_clear(&c);                        /* transparent: the picture shows */
           draw_screens(a, &c, now);
+          for (int y = 0; y < a->H; y++)
+               memcpy((char *)ptr + (size_t)y * pitch, a->back + (size_t)y * a->W, (size_t)a->W * 4);
           a->s->Unlock(a->s);
      } else {
           a->s->Clear(a->s, 0, 0, 0, 0);
      }
+     double t1 = vibe_now_s();
      a->s->SetDrawingFlags(a->s, DSDRAW_BLEND);
      draw_screens(a, NULL, now);
+     double t2 = vibe_now_s();
      if (shot_flag) {
           /* raw dump: "W H\n" then W*H ARGB words, little endian */
           FILE *f = fopen("/tmp/vibe-shot.raw", "wb");
@@ -758,7 +769,9 @@ static void redraw(struct app *a, double now)
      a->s->Flip(a->s, NULL, DSFLIP_WAITFORSYNC);
      a->dirty = 0;
      if (getenv("VIBE_TIMING"))
-          printf("frame %.0f ms\n", (vibe_now_s() - t0) * 1000);
+          printf("frame %.0f ms (shapes %.0f, text %.0f, flip %.0f)\n",
+                 (vibe_now_s() - t0) * 1000, (t1 - t0) * 1000, (t2 - t1) * 1000,
+                 (vibe_now_s() - t2) * 1000);
 }
 
 /* --------------------------------------------------------------- model */
@@ -767,6 +780,10 @@ static void poll_inputs(struct app *a)
 {
      struct biz_input in[BIZ_MAX_INPUTS];
      char cur[32] = "";
+     /* zeroed: the memcmp below compares whole structs, and stack garbage
+      * after the strings made every poll look like a change (a full
+      * redraw every second while a menu was open) */
+     memset(in, 0, sizeof(in));
      int n = biz_inputs(in, BIZ_MAX_INPUTS);
 
      biz_current_input(cur, sizeof(cur));

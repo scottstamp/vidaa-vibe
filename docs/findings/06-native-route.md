@@ -648,6 +648,27 @@ right.
   partly unmeasured. Fills were made more opaque (cards 0xeb, panels 0xf5,
   Home scrim 0xc0→0xf2).
 
+## Drawing speed
+
+The keyboard felt slow (owner). Measured with `VIBE_TIMING=1`: 400 ms a
+frame, of which 370 ms shapes. Three causes, fixed:
+
+- The locked DirectFB surface is display memory, slow to read, and every
+  blended pixel reads it. The same frame drawn by `native/tools/gfx_bench.c`
+  in ordinary RAM took ~60 ms. vibe-ui now draws shapes into a RAM buffer
+  and copies it to the surface row by row (writes only).
+- `gfx_shadow` drew one rounded outline per pixel of spread (22–28 passes
+  over each edge band); now one pass by distance, same falloff.
+- `over()` did five divisions per blended pixel; now one (exact /255 by
+  shift-add).
+
+Also, `poll_inputs` compared input lists with `memcmp` over an unzeroed
+stack buffer, so every poll (1 s while a menu is open) looked like a change
+and forced a full redraw; keys waited behind it. Now zeroed.
+
+Result: keyboard frame ~112 ms (shapes 71, text 14, flip ~25 with
+`DSFLIP_WAITFORSYNC`), down from ~400 ms, and no redraws without a cause.
+
 ## More settings, and volume with a soundbar
 
 2026-11-25. New pages, with keys taken from `libcobalt.so`

@@ -80,4 +80,6 @@ LDFLAGS="-L$LIB -ldirectfb -ldirect -lfusion -lpthread -Wl,--allow-shlib-undefin
 # app_man client tool (dlopens /basic/libgam_client.so)
 "$ZIG" cc $CFLAGS -o "$OUT/vibe-gam" src/vibe-gam.c src/gam.c src/common.c -ldl $COMMON_LD
 "$ZIG" cc $CFLAGS -o "$OUT/vibe-ui" src/vibe-ui.c src/gfx.c src/biz.c src/gam.c src/common.c -ldl -lm $LDFLAGS
+# benchmark of the drawing primitives (not deployed by default)
+"$ZIG" cc $CFLAGS -o "$OUT/gfx_bench" tools/gfx_bench.c src/gfx.c -lm $COMMON_LD
 ls -la "$OUT/vibe" "$OUT/vibe-model" "$OUT/vibe-ui" "$OUT/vibe-gam"
