@@ -7,7 +7,7 @@ S="ssh -o UserKnownHostsFile=server/keys/tv_known_hosts -p 2222 -i server/keys/t
 shot() { # name, keys...
   name=$1; shift
   cmds=""; for k in "$@"; do cmds="${cmds}key $k\n"; done
-  timeout 30 $S "printf '${cmds}' > /tmp/vibe-cmd; chmod 666 /tmp/vibe-cmd; sleep 1.5; printf 'shot\n' > /tmp/vibe-cmd; sleep 1.5; cat /tmp/vibe-shot.raw" > research/shots/$name.raw 2>/dev/null
+  timeout 30 $S "printf '${cmds}' > /tmp/vibe-cmd; chmod 666 /tmp/vibe-cmd; sleep 1.5; printf 'shot\n' > /tmp/vibe-cmd; sleep 1.5; cat /tmp/vibe-shot.raw; rm -f /tmp/vibe-shot.raw" > research/shots/$name.raw 2>/dev/null
   python native/tools/shot2png.py research/shots/$name.raw research/shots/$name.png 0.5 >/dev/null
   echo "$name done"
 }
