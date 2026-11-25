@@ -693,6 +693,23 @@ right.
   partly unmeasured. Fills were made more opaque (cards 0xeb, panels 0xf5,
   Home scrim 0xc0→0xf2).
 
+## Starting before the stock engine (2026-11-25, to be tested at boot)
+
+The DirectFB world's shared-memory file `/dev/shm/shm_tmp/fusion.0` is
+created about 6 s into boot (its mtime against boot time), before `boot.sh`
+starts (~8 s) and before `hisenseUI` (8.1–9.9 s on the boots measured).
+`boot.sh` now waits for that file instead of `hisenseUI`. `debloat.sh` stops
+the stock UI pieces only once `hisenseUI` exists (or after 60 s of uptime),
+so an engine that starts after `vibe-ui` is still stopped; and it kills
+them on later passes instead of freezing them (a frozen engine would keep
+its window). `vibe-ui` takes focus back if the engine's window takes it.
+Unknown until a boot: whether the engine starting after us disturbs the
+layer or our window.
+
+Way back: `touch /var/local/vibe/wait-engine` (the old wait for
+`hisenseUI`), then `restart-ui.sh` has no effect on this (it only matters
+at boot): reboot.
+
 ## To revisit: unused remote buttons
 
 The shortcut button next to MENU, MTS, CC, the mic button, the dash key and

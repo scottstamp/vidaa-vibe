@@ -205,14 +205,20 @@ reap() {
 ui_pass() {
     [ $UI_DONE = 1 ] && return
     [ -n "$(pidof vibe-ui)" ] || return
+    # vibe-ui may start before the stock engine: wait for the engine (up to
+    # a minute of uptime), so it is stopped, not missed
+    u=$(up); u=${u%.*}
+    [ -z "$(pidof hisenseUI)" ] && [ "$u" -lt 60 ] && return
     killed=""; frozen=""
     scan_kill "app_man"
     sleep 2
     scan_kill "$STOP_UI"
     [ -n "$killed" ] && { echo "uptime $(up) stock UI stopped:$killed"; reap; }
     UI_DONE=1
+    # later passes stop them again if they ever come back; not added to
+    # SEEN, so they are killed, never frozen (a frozen engine would keep
+    # its window)
     ALL="$ALL $STOP_UI"
-    for n in $STOP_UI; do SEEN="$SEEN$n "; done
 }
 
 if off; then echo "debloat.off present, not running"; fw_remove; exit 0; fi

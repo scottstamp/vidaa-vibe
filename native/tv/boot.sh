@@ -60,15 +60,22 @@ if [ -f $V/cecmon.on ] && [ -f $V/cecmon.sh ]; then
     $BB setsid /bin/sh $V/cecmon.sh </dev/null >/dev/null 2>&1 &
 fi
 
-# wait for app_man to have the stock engine up: the DirectFB world exists
-# then. No settle delay: vibe-ui takes focus back if the engine's window
-# takes it.
-# Only on the first start of a boot: debloat.sh stops the engine once vibe-ui
-# runs, so a later run of this script (restart-ui.sh) must not wait for it.
+# Wait for the DirectFB world vibe-ui joins as a slave. Its shared-memory
+# file appears about 6 s into boot, before the stock engine (8-10 s), which
+# is what we used to wait for; vibe-ui takes focus back if the engine's
+# window takes it when it starts after us. /var/local/vibe/wait-engine
+# brings back the old wait for the engine.
+# Only on the first start of a boot: a later run of this script
+# (restart-ui.sh) finds the world, and the engine is gone by then.
 if [ ! -f /tmp/vibe-ui.started ]; then
     i=0
-    while [ -z "$(pidof hisenseUI)" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done
-    echo "hisenseUI=[$(pidof hisenseUI)] at uptime $(up)"
+    if [ -f $V/wait-engine ]; then
+        while [ -z "$(pidof hisenseUI)" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done
+        echo "hisenseUI=[$(pidof hisenseUI)] at uptime $(up) (wait-engine)"
+    else
+        while [ ! -e /dev/shm/shm_tmp/fusion.0 ] && [ $i -lt 360 ]; do sleep 0.5; i=$((i+1)); done
+        echo "DirectFB world $([ -e /dev/shm/shm_tmp/fusion.0 ] && echo up || echo MISSING) at uptime $(up), hisenseUI=[$(pidof hisenseUI)]"
+    fi
     : > /tmp/vibe-ui.started
 fi
 
