@@ -813,7 +813,15 @@ static void on_key(struct app *a, int k, int repeat, double now)
           return;
      }
      case DIKS_HOME:
-          if (a->screen == S_NONE) { open_screen(a, S_HOME, now); a->row = 0; a->col = 0; }
+          if (a->screen == S_NONE) {
+               /* focus starts on the input being shown */
+               open_screen(a, S_HOME, now);
+               a->row = 0;
+               a->col = 0;
+               for (int k = 0; k < a->nvis; k++)
+                    if (!strcmp(a->in[a->vis[k]].id, a->cur))
+                         a->col = k;
+          }
           else { a->screen = S_NONE; a->dirty = 1; }
           return;
      case DIKS_MENU:

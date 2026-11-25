@@ -3,6 +3,7 @@
 # on the TV) and save screenshots as PNG under research/shots/.
 #   sh native/tools/tvshots.sh "home 0xf005" "picture 0xf062 0xf012"
 # Each spec: name, then remote keys (hex DirectFB symbols) to press first.
+S="ssh -o UserKnownHostsFile=server/keys/tv_known_hosts -p 2222 -i server/keys/tv_root_ed25519 root@${TV_HOST:-192.168.2.152}"
 shot() { # name, keys...
   name=$1; shift
   cmds=""; for k in "$@"; do cmds="${cmds}key $k\n"; done
