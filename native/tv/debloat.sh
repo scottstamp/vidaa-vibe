@@ -106,8 +106,35 @@ fw_build() {
     echo "VIBE_OUT (nat) built: $($NAT -S VIBE_OUT | $BB wc -l) lines"
 }
 
+# The whole chain and its hook in iptables-restore format: one process, one
+# atomic commit (33 separate iptables runs took ~3 s at boot). The TV's
+# iptables is a multi-call binary that acts as iptables-restore when run
+# under that name. Declaring ":VIBE_OUT" creates the chain or empties it.
+fw_rules() {
+    echo "*nat"
+    echo ":VIBE_OUT - [0:0]"
+    for l in $BLOCK_LABELS; do
+        hex="|$(printf '%02x' ${#l})|$l|"
+        for p in udp tcp; do
+            echo "-A VIBE_OUT -p $p --dport 53 -m string --algo bm --icase --hex-string \"$hex\" -j REDIRECT --to-ports $DEAD_PORT"
+        done
+    done
+    for u in $BLOCK_UIDS; do
+        for p in udp tcp; do
+            echo "-A VIBE_OUT -p $p ! -o lo -m owner --uid-owner $u -j REDIRECT --to-ports $DEAD_PORT"
+        done
+    done
+    echo "-I OUTPUT 1 -j VIBE_OUT"
+    echo "COMMIT"
+}
+
 fw_ensure() {
     $NAT -C OUTPUT -j VIBE_OUT 2>/dev/null && return
+    if fw_rules | (exec -a iptables-restore /usr/local/bin/iptables --noflush); then
+        echo "VIBE_OUT (nat) restored, hooked at uptime $(up): $($NAT -S VIBE_OUT | $BB wc -l) lines"
+        return
+    fi
+    echo "iptables-restore failed; building rule by rule"
     fw_build
     $NAT -I OUTPUT 1 -j VIBE_OUT && echo "VIBE_OUT hooked into nat OUTPUT at uptime $(up)"
 }
