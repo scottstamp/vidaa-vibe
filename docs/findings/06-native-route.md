@@ -889,6 +889,12 @@ connecting…" notice. For 45 s after a connection made in the first 150 s of
 uptime, presses go through (they must) with a "Sound system starting, volume
 may lag" notice.
 
+Boot test (2026-11-25): "soundbar expected: 1 (remembered)" at start; two
+VOL+ presses before the link were dropped; soundbar found at 29.8 s; about
+ten presses between 31 and 65 s showed nothing at first, then the soundbar
+replayed them from 67.7 s to 74.4 s (9 → 12 → 15 → 12 → 9 → 12 → 15 → 12 →
+9). The 45 s notice window (to 74.8 s) matched the replay.
+
 From standby the soundbar connects at once and responds within a couple of
 seconds of wake (owner), so this only matters after a cold boot. Decision
 (owner): leave `tvmain` alone; replacing it, even if possible, risks a
