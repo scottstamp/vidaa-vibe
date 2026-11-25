@@ -56,23 +56,75 @@ static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 /* SIGUSR1: write the next frame (our layer only) to /tmp/vibe-shot.raw */
 static void on_usr1(int sig) { (void)sig; shot_flag = 1; }
 
-enum screen { S_NONE, S_HOME, S_QUICK, S_PICTURE, S_RENAME_INPUT, S_RENAME_NAME };
+enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_RENAME_INPUT, S_RENAME_NAME };
 
 static const char *const picture_modes[] = {
      "Dynamic", "Standard", "Cinema Night", "Cinema Day", "Game", "Sport", "Calibrated"
 };
 #define N_MODES 7
 
-/* picture rows: 0 = mode, the rest numeric 0..100 */
-static const struct { const char *name, *key; } pic_rows[] = {
-     { "Picture mode", NULL },
-     { "Backlight",  BIZ_KEY_BACKLIGHT },
-     { "Brightness", BIZ_KEY_BRIGHTNESS },
-     { "Contrast",   BIZ_KEY_CONTRAST },
-     { "Colour",     BIZ_KEY_COLOUR },
-     { "Sharpness",  BIZ_KEY_SHARPNESS },
+/* ---- settings pages: rows of choices and sliders over model keys */
+enum row_kind { R_CHOICE, R_SLIDER };
+
+struct setting_row {
+     const char *name;
+     enum row_kind kind;
+     const char *key;                 /* model key read and written */
+     int nopts;
+     const int *vals;                 /* choice values */
+     const char *const *names;        /* choice labels */
+     int (*set)(int v);               /* special setter (else set the key) */
+     const char *needs;               /* only shown if this key reads 1 */
 };
-#define N_PIC 6
+
+static int set_picture_mode(int v) { return biz_set_picture_mode(v); }
+
+static const int v_mode[] = { 0, 1, 2, 3, 4, 5, 6 };
+static const int v_off_on[] = { 0, 1 };
+static const char *const n_off_on[] = { "Off", "On" };
+static const int v_speaker[] = { 1, 2, 3 };
+static const char *const n_speaker[] = { "TV speakers", "Soundbar (ARC)", "Optical" };
+static const int v_sound_mode[] = { 0, 1, 2, 3, 4, 5 };
+static const char *const n_sound_mode[] = { "Standard", "Speech", "Late Night", "Music", "Film", "Sport" };
+static const int v_igr[] = { 0, 1, 2 };
+static const char *const n_igr[] = { "Off", "On", "Auto" };
+static const int v_sleep[] = { 0, 15, 30, 60, 90, 120 };
+static const char *const n_sleep[] = { "Off", "15 min", "30 min", "60 min", "90 min", "120 min" };
+
+static const struct setting_row rows_picture[] = {
+     { "Picture mode", R_CHOICE, BIZ_KEY_PICTURE_MODE, 7, v_mode, picture_modes, set_picture_mode, NULL },
+     { "Backlight",  R_SLIDER, BIZ_KEY_BACKLIGHT,  0, NULL, NULL, NULL, NULL },
+     { "Brightness", R_SLIDER, BIZ_KEY_BRIGHTNESS, 0, NULL, NULL, NULL, NULL },
+     { "Contrast",   R_SLIDER, BIZ_KEY_CONTRAST,   0, NULL, NULL, NULL, NULL },
+     { "Colour",     R_SLIDER, BIZ_KEY_COLOUR,     0, NULL, NULL, NULL, NULL },
+     { "Sharpness",  R_SLIDER, BIZ_KEY_SHARPNESS,  0, NULL, NULL, NULL, NULL },
+};
+static const struct setting_row rows_sound[] = {
+     { "Output",     R_CHOICE, BIZ_KEY_SPEAKER,    3, v_speaker, n_speaker, NULL, NULL },
+     { "eARC",       R_CHOICE, BIZ_KEY_EARC,       2, v_off_on, n_off_on, NULL, NULL },
+     { "Sound mode", R_CHOICE, BIZ_KEY_SOUND_MODE, 6, v_sound_mode, n_sound_mode, NULL, NULL },
+};
+static const struct setting_row rows_game[] = {
+     { "Game mode",  R_CHOICE, BIZ_KEY_GAME_MODE,  2, v_off_on, n_off_on, NULL, NULL },
+     { "Low latency", R_CHOICE, BIZ_KEY_IGR, 3, v_igr, n_igr, NULL, BIZ_KEY_IGR_SUPPORTED },
+};
+static const struct setting_row rows_sleep[] = {
+     { "Turn off after", R_CHOICE, BIZ_KEY_SLEEP_TIMER, 6, v_sleep, n_sleep, NULL, NULL },
+};
+
+#define MAX_ROWS 8
+static const struct page {
+     const char *title, *sub;
+     const struct setting_row *rows;
+     int nrows;
+} pages[] = {
+     { "Picture", "Mode, colour", rows_picture, 6 },
+     { "Sound", "Output, mode", rows_sound, 3 },
+     { "Game", "Low latency", rows_game, 2 },
+     { "Sleep timer", "Turn off later", rows_sleep, 1 },
+};
+#define N_PAGES 4
+#define PAGE_PICTURE 0
 
 static const char *const name_presets[] = {
      NULL /* default: the input's own id */, "Apple TV", "PlayStation", "Xbox",
@@ -96,7 +148,9 @@ struct app {
      int  vis[BIZ_MAX_INPUTS], nvis;      /* indexes of inputs we show */
      char cur[32];
      int  vol, mute, vol_known;
-     int  pic[N_PIC], pic_known;
+     int  page;                             /* settings page shown */
+     int  val[MAX_ROWS], val_known;         /* its row values */
+     int  vis_row[MAX_ROWS], nrows_vis;     /* rows this TV supports */
 
      /* UI state */
      enum screen screen;
@@ -249,27 +303,25 @@ static void hints(struct app *a, cv_t *c, int cx, int y, const char *const *pair
 #define CARD_GAP 36
 #define CARD_R   28
 
-static const char *const settings_cards[][2] = {
-     { "Picture", "Mode, backlight, colour" },
-     { "Rename inputs", "Name your devices" },
-};
-#define N_SETTINGS 2
+#define N_SETTINGS (N_PAGES + 1)          /* the pages, then Rename inputs */
+#define SET_CARD_W 300
+#define SET_CARD_GAP 28
 
-static void home_card(struct app *a, cv_t *c, int x, int y, int focus, const char *title,
+static void home_card_w(struct app *a, cv_t *c, int x, int y, int cw, int focus, const char *title,
                       const char *sub, int dot_state /* -1 none, 0 off, 1 on */, int now)
 {
      if (c) {
           if (focus)
-               focus_fill(c, x, y, CARD_W, CARD_H, CARD_R);
+               focus_fill(c, x, y, cw, CARD_H, CARD_R);
           else {
-               gfx_rrect(c, x, y, CARD_W, CARD_H, CARD_R, K_CARD);
-               gfx_rrect_outline(c, x, y, CARD_W, CARD_H, CARD_R, 1, K_PANEL_EDGE);
+               gfx_rrect(c, x, y, cw, CARD_H, CARD_R, K_CARD);
+               gfx_rrect_outline(c, x, y, cw, CARD_H, CARD_R, 1, K_PANEL_EDGE);
           }
           if (dot_state >= 0)
                dot(c, x + 40, y + 52, 14, dot_state ? K_GOOD : (focus ? 0x90ffffff : K_OFF));
      }
      if (now)
-          badge(a, c, x + CARD_W - 24, y + 34, "NOW", focus ? 0x40ffffff : 0x333ddc97,
+          badge(a, c, x + cw - 24, y + 34, "NOW", focus ? 0x40ffffff : 0x333ddc97,
                 focus ? K_TEXT : K_GOOD);
      if (!c) {
           if (sub)
@@ -277,6 +329,12 @@ static void home_card(struct app *a, cv_t *c, int x, int y, int focus, const cha
                       focus ? 0xe6ffffff : K_TEXT2, sub, -1);
           text_v(a, a->f_bold, x + 32, y + CARD_H - 96, 64, K_TEXT, title, -1);
      }
+}
+
+static void home_card(struct app *a, cv_t *c, int x, int y, int focus, const char *title,
+                      const char *sub, int dot_state, int now)
+{
+     home_card_w(a, c, x, y, CARD_W, focus, title, sub, dot_state, now);
 }
 
 static void draw_home(struct app *a, cv_t *c)
@@ -312,8 +370,10 @@ static void draw_home(struct app *a, cv_t *c)
                     in->signal, !strcmp(in->id, a->cur));
      }
      for (int k = 0; k < N_SETTINGS; k++)
-          home_card(a, c, HOME_X + k * (CARD_W + CARD_GAP), 646, a->row == 1 && a->col == k,
-                    settings_cards[k][0], settings_cards[k][1], -1, 0);
+          home_card_w(a, c, HOME_X + k * (SET_CARD_W + SET_CARD_GAP), 646, SET_CARD_W,
+                      a->row == 1 && a->col == k,
+                      k < N_PAGES ? pages[k].title : "Rename inputs",
+                      k < N_PAGES ? pages[k].sub : "Device names", -1, 0);
 
      static const char *const h[] = { "ARROWS", "Navigate", "OK", "Select", "BACK", "Close" };
      hints(a, c, a->W / 2, a->H - 96, h, 3);
@@ -371,43 +431,58 @@ static void slider(cv_t *c, int x, int y, int w, int v, int focus)
      }
 }
 
-static void draw_picture(struct app *a, cv_t *c)
+static const char *choice_name(const struct setting_row *r, int v)
 {
-     int x0 = r_x(a), y0 = 40, h = a->H - 80, rx = x0 + 28, rw = R_W - 56;
-     int top = y0 + 150, row_h = 118;
+     static char buf[24];
+     for (int i = 0; i < r->nopts; i++)
+          if (r->vals[i] == v)
+               return r->names[i];
+     snprintf(buf, sizeof(buf), "%d", v);     /* a value we have no name for */
+     return buf;
+}
 
-     sheet(a, c, x0, y0, R_W, h, "Picture");
-     for (int i = 0; i < N_PIC; i++) {
-          int y = top + i * (row_h + 8), sel = i == a->sel;
-          char val[48];
+static void draw_settings(struct app *a, cv_t *c)
+{
+     const struct page *p = &pages[a->page];
+     int x0 = r_x(a), rx = x0 + 28, rw = R_W - 56, row_h = 118;
+     /* sheet sized to its rows, centred vertically */
+     int h = 150 + a->nrows_vis * (row_h + 8) + 120;
+     if (h > a->H - 80) h = a->H - 80;
+     int y0 = (a->H - h) / 2, top = y0 + 150;
+
+     sheet(a, c, x0, y0, R_W, h, p->title);
+     for (int j = 0; j < a->nrows_vis; j++) {
+          const struct setting_row *r = &p->rows[a->vis_row[j]];
+          int v = a->val[a->vis_row[j]];
+          int y = top + j * (row_h + 8), sel = j == a->sel;
           if (c && sel)
                gfx_rrect(c, rx, y, rw, row_h, 24, K_CARD_HI);
-          if (i == 0) {
-               const char *m = a->pic_known && a->pic[0] >= 0 && a->pic[0] < N_MODES
-                               ? picture_modes[a->pic[0]] : "...";
-               int pw = 300, px = rx + rw - 28 - pw, ph = 56, py = y + (row_h - ph) / 2;
+          if (r->kind == R_CHOICE) {
+               const char *m = a->val_known ? choice_name(r, v) : "...";
+               int pw = 320, px = rx + rw - 28 - pw, ph = 56, py = y + (row_h - ph) / 2;
                if (c) {
                     if (sel) focus_fill(c, px, py, pw, ph, ph / 2);
                     else gfx_rrect(c, px, py, pw, ph, ph / 2, K_CARD);
                } else {
-                    text_v(a, a->f_item, rx + 32, y, row_h, K_TEXT, pic_rows[0].name, -1);
+                    text_v(a, a->f_item, rx + 32, y, row_h, sel ? K_TEXT : K_TEXT2, r->name, -1);
                     text_v(a, a->f_bold, px + pw / 2, py, ph, K_TEXT, m, 0);
                     if (sel) {
                          text_v(a, a->f_bold, px + 26, py, ph, 0xccffffff, "<", 0);
                          text_v(a, a->f_bold, px + pw - 26, py, ph, 0xccffffff, ">", 0);
                     }
                }
-               continue;
-          }
-          snprintf(val, sizeof(val), a->pic_known ? "%d" : "...", a->pic[i]);
-          if (c)
-               slider(c, rx + 32, y + 82, rw - 64, a->pic_known ? a->pic[i] : 0, sel);
-          else {
-               text_v(a, a->f_item, rx + 32, y + 12, 56, sel ? K_TEXT : K_TEXT2, pic_rows[i].name, -1);
-               text_v(a, a->f_bold, rx + rw - 32, y + 12, 56, K_TEXT, val, 1);
+          } else {
+               char val[24];
+               snprintf(val, sizeof(val), a->val_known ? "%d" : "...", v);
+               if (c)
+                    slider(c, rx + 32, y + 82, rw - 64, a->val_known ? v : 0, sel);
+               else {
+                    text_v(a, a->f_item, rx + 32, y + 12, 56, sel ? K_TEXT : K_TEXT2, r->name, -1);
+                    text_v(a, a->f_bold, rx + rw - 32, y + 12, 56, K_TEXT, val, 1);
+               }
           }
      }
-     static const char *const hh[] = { "LEFT/RIGHT", "Adjust", "BACK", "Back" };
+     static const char *const hh[] = { "LEFT/RIGHT", "Change", "BACK", "Back" };
      hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, 2);
 }
 
@@ -503,7 +578,7 @@ static void draw_screens(struct app *a, cv_t *c, double now)
      switch (a->screen) {
      case S_HOME:         draw_home(a, c); break;
      case S_QUICK:        draw_quick(a, c); break;
-     case S_PICTURE:      draw_picture(a, c); break;
+     case S_SETTINGS:     draw_settings(a, c); break;
      case S_RENAME_INPUT: draw_list(a, c, "Rename inputs", a->nvis, rename_input_label, rename_input_sub); break;
      case S_RENAME_NAME: {
           char t[96];
@@ -595,16 +670,34 @@ static void poll_volume(struct app *a, double now)
      a->vol_known = 1;
 }
 
-static void poll_picture(struct app *a)
+/* read every row of the open page, and which rows this TV supports */
+static void poll_page(struct app *a)
 {
-     int v[N_PIC];
-     biz_get_int(BIZ_KEY_PICTURE_MODE, &v[0]);
-     for (int i = 1; i < N_PIC; i++)
-          biz_get_int(pic_rows[i].key, &v[i]);
-     if (!a->pic_known || memcmp(v, a->pic, sizeof(v))) {
-          memcpy(a->pic, v, sizeof(v));
-          a->pic_known = 1;
-          a->dirty = a->screen == S_PICTURE;
+     const struct page *p = &pages[a->page];
+     int v[MAX_ROWS], vis[MAX_ROWS], n = 0;
+
+     for (int i = 0; i < p->nrows; i++) {
+          const struct setting_row *r = &p->rows[i];
+          int ok = 1;
+          v[i] = 0;
+          biz_get_int(r->key, &v[i]);
+          if (r->needs) {
+               int s = 0;
+               biz_get_int(r->needs, &s);
+               ok = s == 1;
+          }
+          if (ok)
+               vis[n++] = i;
+     }
+     if (!a->val_known || n != a->nrows_vis || memcmp(v, a->val, p->nrows * sizeof(int)) ||
+         memcmp(vis, a->vis_row, n * sizeof(int))) {
+          memcpy(a->val, v, p->nrows * sizeof(int));
+          memcpy(a->vis_row, vis, n * sizeof(int));
+          a->nrows_vis = n;
+          if (a->sel >= n)
+               a->sel = n ? n - 1 : 0;
+          a->val_known = 1;
+          a->dirty = a->screen == S_SETTINGS;
      }
 }
 
@@ -623,9 +716,14 @@ static void open_screen(struct app *a, enum screen s, double now)
           a->next_inputs = now;
      } else if (s == S_HOME) {
           a->next_inputs = now;
-     } else if (s == S_PICTURE) {
+     } else if (s == S_SETTINGS) {
+          /* never draw a page with the previous page's row list: read the
+           * new page now, before the first frame */
           a->sel = 0;
-          a->next_pic = now;
+          a->val_known = 0;
+          a->nrows_vis = 0;
+          poll_page(a);
+          a->next_pic = now + 1.0;
      } else if (s == S_RENAME_INPUT) {
           a->sel = 0;
      } else if (s == S_RENAME_NAME) {
@@ -678,7 +776,13 @@ static void key_home(struct app *a, int k, double now)
                a->screen = S_NONE;
                a->dirty = 1;
           } else if (a->row == 1) {
-               open_screen(a, a->col == 0 ? S_PICTURE : S_RENAME_INPUT, now);
+               if (a->col < N_PAGES) {
+                    a->page = a->col;
+                    a->val_known = 0;
+                    open_screen(a, S_SETTINGS, now);
+               } else {
+                    open_screen(a, S_RENAME_INPUT, now);
+               }
           }
           break;
      case DIKS_BACK: case DIKS_EXIT:
@@ -706,16 +810,17 @@ static void key_quick(struct app *a, int k, double now)
      }
 }
 
-static void key_picture(struct app *a, int k, int repeat, double now)
+static void key_settings(struct app *a, int k, int repeat, double now)
 {
+     const struct page *p = &pages[a->page];
      int d = 0;
      switch (k) {
-     case DIKS_CURSOR_UP:    list_move(a, N_PIC, -1); return;
-     case DIKS_CURSOR_DOWN:  list_move(a, N_PIC, +1); return;
+     case DIKS_CURSOR_UP:    list_move(a, a->nrows_vis, -1); return;
+     case DIKS_CURSOR_DOWN:  list_move(a, a->nrows_vis, +1); return;
      case DIKS_CURSOR_LEFT:  d = -1; break;
      case DIKS_CURSOR_RIGHT: d = +1; break;
      case DIKS_BACK:
-          open_screen(a, S_HOME, now); a->row = 1; a->col = 0;
+          open_screen(a, S_HOME, now); a->row = 1; a->col = a->page;
           return;
      case DIKS_EXIT:
           a->screen = S_NONE; a->dirty = 1;
@@ -723,24 +828,29 @@ static void key_picture(struct app *a, int k, int repeat, double now)
      default:
           return;
      }
-     if (!a->pic_known)
+     if (!a->val_known || a->sel >= a->nrows_vis)
           return;
-     if (a->sel == 0) {
+     int ri = a->vis_row[a->sel];
+     const struct setting_row *r = &p->rows[ri];
+     int v, rc;
+     if (r->kind == R_CHOICE) {
           if (repeat)
-               return;                  /* one mode per press */
-          int m = (a->pic[0] + d + N_MODES) % N_MODES;
-          int r = biz_set_picture_mode(m);
-          printf("picture mode %d (%s) -> r=%d\n", m, picture_modes[m], r);
-          a->pic[0] = m;
-          a->next_pic = now + 0.6;      /* a mode change moves the other values */
+               return;                  /* one step per press */
+          int i = 0;
+          for (int j = 0; j < r->nopts; j++)
+               if (r->vals[j] == a->val[ri])
+                    i = j;
+          i = (i + d + r->nopts) % r->nopts;
+          v = r->vals[i];
      } else {
-          int v = a->pic[a->sel] + d * (repeat ? 2 : 1);
+          v = a->val[ri] + d * (repeat ? 2 : 1);
           v = v < 0 ? 0 : v > 100 ? 100 : v;
-          int r = biz_set_int(pic_rows[a->sel].key, v);
-          printf("%s %d -> r=%d\n", pic_rows[a->sel].name, v, r);
-          a->pic[a->sel] = v;
-          a->next_pic = now + 1.0;
      }
+     rc = r->set ? r->set(v) : biz_set_int(r->key, v);
+     printf("%s: %s = %d -> r=%d\n", p->title, r->name, v, rc);
+     a->val[ri] = v;
+     /* a change can move other rows (picture mode moves the sliders) */
+     a->next_pic = now + (r->kind == R_CHOICE ? 0.6 : 1.0);
      a->dirty = 1;
 }
 
@@ -770,7 +880,7 @@ static void key_rename(struct app *a, int k, double now)
           break;
      case DIKS_BACK:
           if (a->screen == S_RENAME_NAME) open_screen(a, S_RENAME_INPUT, now);
-          else { open_screen(a, S_HOME, now); a->row = 1; a->col = 1; }
+          else { open_screen(a, S_HOME, now); a->row = 1; a->col = N_PAGES; }
           break;
      case DIKS_EXIT:
           a->screen = S_NONE; a->dirty = 1;
@@ -825,21 +935,21 @@ static void on_key(struct app *a, int k, int repeat, double now)
           else { a->screen = S_NONE; a->dirty = 1; }
           return;
      case DIKS_MENU:
-          if (a->screen == S_PICTURE) { a->screen = S_NONE; a->dirty = 1; }
-          else open_screen(a, S_PICTURE, now);
+          if (a->screen == S_SETTINGS) { a->screen = S_NONE; a->dirty = 1; }
+          else { a->page = PAGE_PICTURE; a->val_known = 0; open_screen(a, S_SETTINGS, now); }
           return;
      case KEY_INPUT:
           if (a->screen != S_QUICK) { open_screen(a, S_QUICK, now); return; }
           break;
      }
-     if (repeat && a->screen != S_PICTURE &&
+     if (repeat && a->screen != S_SETTINGS &&
          k != DIKS_CURSOR_UP && k != DIKS_CURSOR_DOWN &&
          k != DIKS_CURSOR_LEFT && k != DIKS_CURSOR_RIGHT)
           return;
      switch (a->screen) {
      case S_HOME:         key_home(a, k, now); break;
      case S_QUICK:        key_quick(a, k, now); break;
-     case S_PICTURE:      key_picture(a, k, repeat, now); break;
+     case S_SETTINGS:     key_settings(a, k, repeat, now); break;
      case S_RENAME_INPUT:
      case S_RENAME_NAME:  key_rename(a, k, now); break;
      case S_NONE:         break;
@@ -1028,9 +1138,8 @@ int main(int argc, char **argv)
      }
      poll_inputs(a);
      poll_volume(a, t0);
-     poll_picture(a);
-     printf("model: %d inputs, current %s, volume %d, mute %d, picture mode %d (%.0f ms)\n",
-            a->nin, a->cur, a->vol, a->mute, a->pic[0], (vibe_now_s() - t0) * 1000);
+     printf("model: %d inputs, current %s, volume %d, mute %d (%.0f ms)\n",
+            a->nin, a->cur, a->vol, a->mute, (vibe_now_s() - t0) * 1000);
 
      if (a->gam) {
           const char *gn = a->gam_name ? a->gam_name : "vibe";
@@ -1098,8 +1207,8 @@ int main(int argc, char **argv)
                poll_inputs(a);
                a->next_inputs = now + (a->screen != S_NONE ? 1.0 : 3.0);
           }
-          if (a->screen == S_PICTURE && now >= a->next_pic) {
-               poll_picture(a);
+          if (a->screen == S_SETTINGS && now >= a->next_pic) {
+               poll_page(a);
                a->next_pic = now + 1.0;
           }
           /* overlays that just expired need one more redraw to vanish */

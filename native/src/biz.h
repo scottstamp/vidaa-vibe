@@ -45,6 +45,17 @@ void   biz_vec_free(char **v);
 #define BIZ_KEY_CONTRAST      "kilby.sl2.i32.video.contrast"
 #define BIZ_KEY_COLOUR        "kilby.sl2.i32.video.colour.intensity"
 #define BIZ_KEY_SHARPNESS     "kilby.sl2.i32.video.sharpness"
+/* sound (modeljs_atsc::Sound, read in libcobalt) */
+#define BIZ_KEY_SPEAKER       "kilby.sl2.i32.sound.speaker.arc.mode"   /* 1 TV, 2 ARC, 3 optical */
+#define BIZ_KEY_EARC          "kilby.sl2.i32.sound.earc.switch.value"  /* 0/1 */
+#define BIZ_KEY_SOUND_MODE    "kilby.sl2.i32.sound.enum.adjust"        /* 0 Standard .. 5 Sport */
+#define BIZ_KEY_ARC_DEVICE    "kilby.sl2.i32.sound.arcdev.exist"
+/* game (modeljs_atsc::Video) */
+#define BIZ_KEY_GAME_MODE     "kilby.sl2.i32.video.game.mode.enable"   /* 0/1 */
+#define BIZ_KEY_IGR           "kilby.sl2.i32.video.enum.instant.game.response" /* 0 off 1 on 2 auto */
+#define BIZ_KEY_IGR_SUPPORTED "kilby.sl2.i32.video.instant.game.response.supported"
+/* sleep timer, minutes (modeljs_atsc::TimerFunction::SetHotelmodeSleepTimer) */
+#define BIZ_KEY_SLEEP_TIMER   "kilby.sl2.i32.timerfunctions.hotelmode.sleep.timer"
 /* modeljs.source.InputRename([sourceId, name]) */
 #define BIZ_ACTION_RENAME     "kilby.sl2.action.source.input.rename"
 
