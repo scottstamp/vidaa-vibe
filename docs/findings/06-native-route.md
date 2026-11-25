@@ -745,6 +745,58 @@ now). Auto sleep (`timerfunctions.auto.sleep`, 3 h / 4 h, also counted by
 the UI) is not offered. Not yet tested on the TV: the no-signal countdown
 end to end, the picture reset, an HDMI format change.
 
+## Earlier than app_man: can services be kept from starting? (research)
+
+2026-11-25, a read-only investigation (five search angles over the boot
+scripts, `app_man`, the other early daemons, the loader and writable
+symlinks, kernel/hotplug; each candidate checked for timing and for
+effect/safety). Raw result: `research/58a51huv/recon/early-hooks-workflow.json`
+(gitignored).
+
+Timing, corrected: `/proc/boottime` runs about 2.5 s ahead of
+`/proc/uptime`. On the uptime clock the hook (`otaTest.sh`) starts at
+5.26 s (`/var/local/alvidaa-hook.log`: "stage0 5.26"), dropbear at about
+5.8 s; our vibe-ui block sits at the hook's end and runs at about 8.6 s.
+`app_man` creates `/tmp/fifo_am_read` (and `/dev/shm/shm_tmp/fusion.0`
+appears in the same second) about 7 s after boot (ctime against `btime`,
+whole seconds); per the disassembly it reads `/basic/am_config` once, after
+its DirectFB setup and that fifo. So `app_man` very likely masters the
+DirectFB world `vibe-ui` joins: it must keep starting.
+
+No writable file that runs before the hook was found within the rules:
+`/config/*_profile` (run by rcS as root) and `Customization3RDFunc.ini`
+(per-service `bEnabled=false` in `app_man`) are on mmcblk0p26 (read-only,
+would need a remount); the vendor path that writes there goes through
+`/var/local/oem` (never touch). FactoryOpenState lives in the bootloader
+environment (excluded). A library in `/var/local/lib` for `apmbond` loads
+after the hook and a failure reboots the TV. `/tmp/UpgradeProgressOn`
+stalls `apmbond`. Stand-ins that exit 2 change nothing (no `start_self`;
+the respawns come from systemserver's keep-alive). `hotelmode.ini` and
+`HI_UI_HOME` do not help.
+
+What does work, in principle (untested): our hook already runs before both
+config reads, so it can bind-mount edited copies of two read-only config
+files (a bind mount over a file; the verified partition is not remounted
+or written):
+
+1. `/basic/am_config`, read by `app_man` at about 6–7 s: `power_on_start =
+   false` for the unused services stops `app_man`'s own boot starts
+   (Netflix, ota_upgrade, app_upgrade, hi_logreport_service, resmon,
+   HiAvsService, mosquitto, ai_manager, vidaa_ai_service, AirPlayBridge,
+   masman, mdharvester, reggieserver; TTSPlayer and dialserver may be
+   started regardless, per the disassembly). `apm_bond` and `hisenseUI`
+   must stay. A malformed copy makes `app_man` exit ("PM init failed"): no
+   DirectFB world, no `vibe-ui` that boot (SSH unaffected). The bind must
+   come early in the hook (~5.3 s), not in `boot.sh` (~8.7 s).
+2. `/usr/local/opt/etc/data/apm/application-config-us.ini`, read by
+   systemserver's app manager at about 10.06 s: its `[auto_start_4k]`
+   list starts the browser (~11 s), remoteservice, remoteapp_biz_client,
+   dlna_service, avsservice (~21.7 s). Its `[hotkey]` section must stay
+   byte-identical (`tvmain` reads it on wake). Read once.
+
+Not explained: what starts QDA and Netflix_Splash. Both files are read once,
+so a mount after the read changes nothing until the next boot.
+
 ## To revisit: unused remote buttons
 
 The shortcut button next to MENU, MTS, CC, the mic button, the dash key and
