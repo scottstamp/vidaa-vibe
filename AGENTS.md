@@ -1,20 +1,47 @@
 # AGENTS.md — working on vidaa-vibe with an AI session
 
 Briefing for an agent, or a person driving one. Read
-[docs/findings/05-traps.md](docs/findings/05-traps.md) before touching the TV.
+[docs/findings/05-traps.md](docs/findings/05-traps.md) before touching the TV,
+and [docs/findings/06-native-route.md](docs/findings/06-native-route.md) for
+how the replacement works.
 
 ## What this repo is
 
 One goal: replace the stock VIDAA UI on the owner's Hisense 58A51HUV with our
-own code. The TV is rooted (key-only SSH on tcp/2222). Nothing of the stock UI
-has been changed yet.
+own code. The TV is rooted (key-only SSH on tcp/2222). The TV is used for its
+HDMI inputs only: no live TV, none of the built-in apps.
+
+## Where it stands
+
+`vibe-ui`, our native DirectFB program, is the UI, started at every boot:
+
+1. `rc.local` runs the hook `/var/local/otaTest.sh`; its vidaa-vibe block
+   starts `/var/local/vibe/boot.sh` (`native/tv/hook-patch.sh` adds or
+   removes the block).
+2. `boot.sh` starts `debloat.sh`, waits for the stock engine, then runs
+   `vibe-ui` and restarts it if it exits (10 tries).
+3. The stock engine boots from slot B, a blank transparent page
+   (`runFlag` 1 in `/var/local/appUpgrade/appRunTimeInfoFile.json`), so it
+   draws nothing.
+4. `debloat.sh` stops the stock services the TV does not use, then, once
+   `vibe-ui` runs, `app_man`, `apmbond`, `hisenseUI` and `LauncherService`.
+   It also keeps the TV off Hisense's servers (nat-table chain `VIBE_OUT`)
+   while leaving the internet open for third-party services.
+
+`systemserver` and `tvmain` stay: they handle the remote, power, picture,
+sound and CEC. The stock bundle in `/APPS/channelA` is untouched.
+
+Ways back (all over SSH, each documented in 06-native-route.md):
+
+| Switch | Effect |
+| --- | --- |
+| `touch /var/local/vibe/off` (or `/var/local/vibe-off`) | `vibe-ui` not started at the next boot |
+| `touch /var/local/vibe/debloat.off` | nothing stopped, no Hisense block, from the next boot (the running script lifts the block within 60 s) |
+| `touch /var/local/vibe-stock` | at the next boot, `boot.sh` restores the original runtime file (md5-checked) and starts nothing; the stock UI is back from the boot after |
+| `HOOK_STEP=revert sh /var/local/vibe/hook-patch.sh` | takes our block out of the hook |
 
 ## Ground rules
 
-- **DO NOT write anything to execute on boot**, keep the original OS UI
-  in tact on boot so we can recover if anything goes wrong and the
-  replacement causes a crash loop or similar. Once the project is in a
-  stable state we will manually instruct you to create a boot hook.
 - **Only this TV, on this LAN.** No DRM circumvention.
 - **Every change has a way back, written down before the change.** The way
   back must not depend on the thing being changed: a UI experiment is
@@ -23,8 +50,15 @@ has been changed yet.
   restart, replace or reconfigure the daemon without a second way in already
   running (see "Updating the daemon" in
   [02-root-access.md](docs/findings/02-root-access.md)).
+- **The boot path must keep working.** A change to `boot.sh`, `debloat.sh`
+  or `vibe-ui` is deployed and tried with `restart-ui.sh` first; the
+  switches above must keep working. Deploys write `.new` and rename, never
+  rewrite a running script in place.
 - **Verified boot stays green.** Read-only partitions are not remounted, and
   raw eMMC (`/dev/mmcblk*`) is never written.
+- **Leave `tvmain` alone** (owner's decision), even if it could be replaced:
+  it runs inputs, picture, sound and CEC, and a broken one may not be
+  recoverable.
 - **Never touch:** `/OAD` (OTA staging), `/var/tvservice/reset_working`
   (factory-reset trigger), `/var/local/oem` (root OEM deployer),
   `/APPS/pkgs/NewUpdatedIPK.txt` (root-exec trigger). Reasons are in the
@@ -32,31 +66,58 @@ has been changed yet.
 - **The stock UI bundle in `/APPS/channelA/hisenseUI` is the fallback.** Do
   not edit it in place until there is a verified copy elsewhere and a tested
   way to restore it.
+- **Never send `kilby.action.system.switch.off.tv`.** It left the TV in a
+  standby nothing woke from. POWER is left to the system
+  (`system.gui.loop.finished` = 1).
+- **Never guess model action names.** The `system.*` family includes
+  factory reset and clearing user data.
+- **Volume never above 15.** The owner sits next to the soundbar.
 - **Never start the UI engine as root**, and never leave root-owned files in
-  its state directories.
+  its state directories (`vibe-ui` runs as UhisUI, uid 311; its state is in
+  `/var/local/vibe/state`, owned by it).
 - **MQTT:** on this TV never send `sendkey`, never poll `gettvstate`, never
   send `authenticationcodeclose` to an unanswered dialog. A PIN-dialog loop
-  follows and only a re-pair clears it.
-- **Ask before anything the owner would see on screen.** Killing the UI
-  engine, flipping the UI slot and rebooting all interrupt whoever is
-  watching.
+  follows and only a re-pair clears it. (The broker is stopped now; the rule
+  stands if it comes back.)
+- **Ask before anything the owner would see on screen**: rebooting,
+  restarting the UI while they use it, opening menus through the dev hook,
+  switching inputs. Reboots (`sync; /bin/reboot`) come back on their own.
 - **Keys and tokens stay in `server/keys/`** (gitignored).
+
+## Building and deploying
+
+- Build in WSL: `wsl.exe -e bash native/build.sh` (zig, armv7 hard-float,
+  glibc 2.21). WSL cannot reach the TV.
+- Deploy from Windows: `TV_HOST=192.168.2.152 native/deploy.sh`. It copies
+  binaries and scripts and starts nothing.
+- Apply: `sh /var/local/vibe/restart-ui.sh` on the TV (restarts `boot.sh`
+  and `vibe-ui`; `debloat.sh` runs once per boot).
+- The TV's address is DHCP-assigned; `server/tv` defaults to an old one, so
+  set `TV_HOST`.
+- Screens: `/var/local/vibe/dev` turns on the dev hook (`/tmp/vibe-cmd`:
+  `key 0xHEX`, `shot`); `native/tools/tvshots.sh` drives it from the PC.
+  Frame timing: run `restart-ui.sh` with `VIBE_TIMING=1`.
 
 ## Working over SSH
 
 - No PTY. Use one-shot commands, or pipe a script: `ssh … 'sh -s' < script.sh`.
   Never pass `-t`.
-- `id`, `uname`, `tail`, `wc`, `df`, `netstat`, `stty`, `which` exist only as
-  busybox applets: call `/usr/local/bin/busybox <applet>`. `sort` and `xargs`
-  exist only in `/bin`. Not present at all: `tr`, `wget`, `curl`, `nc`,
-  `readlink`, `uniq`, `cmp`, `strings`.
-- `/bin/sh` is bash 3.2.
+- `id`, `uname`, `tail`, `wc`, `df`, `netstat`, `stty`, `which`, `cut` exist
+  only as busybox applets: call `/usr/local/bin/busybox <applet>`. `sort` and
+  `xargs` exist only in `/bin`. Not present at all: `tr`, `wget`, `curl`,
+  `nc`, `readlink`, `uniq`, `cmp`, `strings`, `od`.
+- `/bin/sh` is bash 3.2: a `case` pattern inside `$( )` needs its leading
+  `(`.
+- `/usr/local/bin/iptables` is multi-call: `exec -a iptables-restore …`.
 - A command that can block (reading a device, a fifo) needs its own
   watchdog: `read -t` did not time out on a tty device here.
 - Files that the browser bridge created (`/var/local/otaTest.sh`,
   `/var/local/alvidaa-db.*`) are owned by `UhisWebsdk`. Rewrite them in place
   with `cat new > file`; replacing them makes them root-owned and breaks the
   bridge's no-op button, which is the disarm of last resort.
+- Write anything with backslashes or quotes to a file first (or edit with a
+  tool): heredocs and `sed` replacement strings have broken C strings here
+  more than once.
 
 ## Findings discipline
 
@@ -73,5 +134,8 @@ tracked file if it quotes vendor code or carries the unit's identifiers.
 | `server/tv` | root SSH wrapper (`TV_HOST`, `TV_NOPTY`) |
 | `server/keys/` | SSH key, pinned host key, pairing material (gitignored) |
 | `server/vidaa_server.py`, `server/pair.py` | alvidaa's launcher server and MQTT pairing, copied as they were |
-| `native/` | our own DirectFB client (`vibe`), build and deploy scripts, vendor-ABI tools; see its README |
-| `research/58a51huv/recon/` | read-only recon scripts and their raw output (gitignored) |
+| `native/src/` | `vibe-ui` and the tools `vibe`, `vibe-model`, `vibe-gam` |
+| `native/tv/` | the scripts deployed to `/var/local/vibe` (`boot.sh`, `debloat.sh`, `restart-ui.sh`, `hook-patch.sh`, probes) |
+| `native/slotb/` | the blank page for slot B and its installer |
+| `native/tools/` | vendor-ABI tools, screenshots, `gfx_bench` |
+| `research/` | recon scripts, raw output, screenshots (gitignored) |

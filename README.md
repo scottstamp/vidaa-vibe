@@ -17,9 +17,10 @@ further: the stock UI is the thing being replaced.
 | Map of the UI stack | done for the outside: engine, bundle, A/B slots, input, display |
 | The UI's own native API | not mapped |
 | Native route (own DirectFB client) | works: `native/vibe` joins the UI's DirectFB world, shows a window, gets focus and remote keys |
-| TV functions from native code | inputs, volume, mute through the vendor's model facade; POWER (standby and wake) handled by the system once our UI reports itself loaded |
-| Our UI at boot | `vibe-ui` starts from the boot hook about 14 s into boot; the TV restores the last input by itself |
-| Anything replaced | the stock UI boots from slot B as an empty page (no Hisense UI on screen); slot A untouched; way back in [06](docs/findings/06-native-route.md) |
+| TV functions from native code | inputs, input names (presets or an on-screen keyboard), volume and mute (follows a soundbar over ARC), picture, sound, game and sleep-timer settings, through the vendor's model facade; POWER (standby and wake) handled by the system once our UI reports itself loaded |
+| Our UI at boot | `vibe-ui` starts from the boot hook 8–10 s into boot; the TV restores the last input by itself. CEC (soundbar, waking HDMI devices) takes ~30 s after a cold boot, in `tvmain`, as with the stock OS |
+| Anything replaced | the stock UI boots from slot B as an empty page, and is stopped once `vibe-ui` runs, with `app_man` and the stock services the TV does not use; slot A untouched; way back in [06](docs/findings/06-native-route.md) |
+| Hisense's servers | blocked (DNS for their domains, all traffic of their updaters and reporters); the internet stays open for third-party services |
 
 ## The unit
 
@@ -37,7 +38,7 @@ Everything here was measured on that unit unless a line says otherwise.
 | [03-system-map.md](docs/findings/03-system-map.md) | partitions, boot chain, processes, listeners, firewall |
 | [04-ui-stack.md](docs/findings/04-ui-stack.md) | what draws the UI, where its code lives, how it could be replaced |
 | [05-traps.md](docs/findings/05-traps.md) | every trap hit or read about, one line each |
-| [06-native-route.md](docs/findings/06-native-route.md) | DirectFB world, the vendor ABI, our first native window |
+| [06-native-route.md](docs/findings/06-native-route.md) | DirectFB world, the vendor ABI, vibe-ui, boot, services, CEC, drawing |
 
 Raw command output behind these files is in `research/58a51huv/recon/`
 (gitignored: it quotes vendor scripts).
