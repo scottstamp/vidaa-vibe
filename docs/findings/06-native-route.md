@@ -589,6 +589,27 @@ remote, with Linux and every process up throughout, exactly as on stock.
 itself loaded, the system takes POWER before any window does. Our app does
 nothing for power; it only sets the flag at start.
 
+## Sleep timer: what happens at expiry
+
+Test (2026-11-25): Sleep timer set to 15 min from vibe-ui at uptime 157.9 s
+(`timerfunctions.hotelmode.sleep.timer` = 15; the stock UI uses the same
+key, `modeljs.timerfunc.setHotelmodeSleepTimer`). The TV did not turn off.
+Syslog: at 997.9 s (one minute early) `tvmain`'s timer service logged
+`notifyGuiMessage Value '2'` and set
+`kilby.sl2.i32.timerfunctions.suppress.key.global.action` = 1; afterwards
+the timer read 0, `timerfunctions.switch.off.notify` 2, and the suppress
+flag stayed 1. Nothing powered off: `tvmain` only tells the UI.
+
+In the stock bundle the UI does the switch-off: its "Mask" (closing
+curtain) fades the volume to 0 over the curtain's duration and then calls
+`modeljs.system.SwitchOffTv([4])`, i.e. `kilby.action.system.switch.off.tv`
+— the action that stranded the display earlier (above, while
+`gui.loop.finished` was still 0). The voice handler uses a different route
+for "power off": `appC.sendAppMessage("TvsApm",
+'{"action":"poweroff",...}')`, a message to the app manager in
+`systemserver`. Not mapped yet: how `appC.sendAppMessage` reaches it, and
+what the suppress flag suppresses (the stock UI presumably clears it).
+
 ## Custom input names
 
 Rename → input → "Custom name…" opens an on-screen keyboard (digits, a–z
