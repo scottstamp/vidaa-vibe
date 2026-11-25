@@ -161,16 +161,23 @@ struct app {
      int W, H;
      uint32_t *back;              /* W*H ARGB drawing buffer in RAM */
      /* partial redraws (dirty == 2): only the old and new focus (and, with
-      * want_aux, the keyboard's text field) are drawn again */
-     int  want_aux, have_frame;
+      * want_aux, the keyboard's text field; with want_hud, the volume HUD
+      * and the no-signal notice) are drawn again */
+     int  want_aux, want_hud, have_frame;
      int  last_screen;
-     struct rect last_focus, last_region;
+     struct rect last_focus, last_hud, last_region;
 
      /* model state */
      struct biz_input in[BIZ_MAX_INPUTS];
      int  nin;
      int  vis[BIZ_MAX_INPUTS], nvis;      /* indexes of inputs we show */
      char cur[32];
+     /* "No signal" notice: the current input (not the tuner) has had no
+      * signal since nosig_since; shown after 3 s with no menu open */
+     int  nosig_lost, nosig_shown;
+     double nosig_since;
+     char nosig_cur[32];           /* the input nosig_since is about */
+     char nosig_text[96];          /* what the notice shows */
      int  vol, mute, vol_known;
      int  vol_shown;               /* what the volume bar shows */
      /* soundbar over ARC: the system forwards the remote's volume and mute
@@ -303,6 +310,7 @@ static void sheet(struct app *a, cv_t *c, int x, int y, int w, int h, const char
 /* ---- partial redraws: what a focus move or typing touches */
 static struct rect g_focus;               /* focused element(s) of this frame */
 static struct rect g_aux;                 /* the keyboard's text field */
+static struct rect g_hud;                 /* volume HUD and no-signal notice */
 
 static int rect_empty(struct rect r) { return r.x0 >= r.x1 || r.y0 >= r.y1; }
 
@@ -731,6 +739,7 @@ static void draw_volume(struct app *a, cv_t *c)
      int v = a->vol_shown < 0 ? 0 : a->vol_shown > 100 ? 100 : a->vol_shown;
      int bx = x + 190, bw = w - 190 - 56;
      if (c) {
+          rect_add(&g_hud, x - 24, y - 24, x + w + 24, y + h + 24);   /* + shadow */
           gfx_shadow(c, x, y, w, h, h / 2, 24, 0x90000000);
           gfx_rrect(c, x, y, w, h, h / 2, K_PANEL);
           gfx_rrect_outline(c, x, y, w, h, h / 2, 1, K_PANEL_EDGE);
@@ -743,6 +752,21 @@ static void draw_volume(struct app *a, cv_t *c)
           snprintf(label, sizeof(label), a->mute ? "Muted" : "%d", v);
           text_v(a, a->f_tiny, x + 56, y + 14, 34, K_TEXT3, "VOLUME", -1);
           text_v(a, a->mute ? a->f_item : a->f_head, x + 56, y + 40, 54, K_TEXT, label, -1);
+     }
+}
+
+/* "<input> . No signal", small, bottom left */
+static void draw_nosig(struct app *a, cv_t *c)
+{
+     int w = text_width(a->f_item, a->nosig_text) + 100, h = 72, x = 72, y = a->H - 152;
+     if (c) {
+          rect_add(&g_hud, x - 24, y - 24, x + w + 24, y + h + 24);   /* + shadow */
+          gfx_shadow(c, x, y, w, h, h / 2, 24, 0x90000000);
+          gfx_rrect(c, x, y, w, h, h / 2, K_PANEL);
+          gfx_rrect_outline(c, x, y, w, h, h / 2, 1, K_PANEL_EDGE);
+          dot(c, x + 38, y + h / 2, 12, K_OFF);
+     } else {
+          text_v(a, a->f_item, x + 62, y, h, K_TEXT2, a->nosig_text, -1);
      }
 }
 
@@ -762,6 +786,8 @@ static void draw_screens(struct app *a, cv_t *c, double now)
      case S_KEYBOARD:     draw_keyboard(a, c); break;
      case S_NONE:         break;
      }
+     if (a->nosig_shown && a->screen == S_NONE)
+          draw_nosig(a, c);
      if (now < a->toast_until)
           draw_toast(a, c);
      if (now < a->vol_until)
@@ -782,9 +808,10 @@ static void redraw(struct app *a, double now)
           a->back = malloc((size_t)a->W * a->H * 4);
 
      /*
-      * Partial frame (dirty == 2: a focus move, or typing): the RAM buffer
-      * holds the whole previous frame, so only the old focus and the new one
-      * (and the text field when typing) are drawn again. A measuring pass
+      * Partial frame (dirty == 2: a focus move, typing, or a HUD change):
+      * the RAM buffer holds the whole previous frame, so only the old focus
+      * and the new one (and the text field when typing, and the HUDs' old
+      * and new places) are drawn again. A measuring pass
       * with an empty clip finds the new focus without drawing; a list that
       * scrolled (top moved) needs the full frame. The window is double
       * buffered, so the surface gets this frame's region and the last one's.
@@ -795,7 +822,7 @@ static void redraw(struct app *a, double now)
      if (partial) {
           struct canvas m = { a->back, a->W, a->W, a->H, 1, 0, 0, 0, 0 };
           int top = a->top;
-          g_focus = g_aux = (struct rect){ 0, 0, 0, 0 };
+          g_focus = g_aux = g_hud = (struct rect){ 0, 0, 0, 0 };
           draw_screens(a, &m, now);
           if (a->top != top) {
                partial = 0;
@@ -804,6 +831,12 @@ static void redraw(struct app *a, double now)
                rect_add(&region, g_focus.x0, g_focus.y0, g_focus.x1, g_focus.y1);
                if (a->want_aux)
                     rect_add(&region, g_aux.x0, g_aux.y0, g_aux.x1, g_aux.y1);
+               /* the HUDs: old and new place, so one that appears, changes
+                * or vanishes (new rect empty) is covered */
+               if (a->want_hud || memcmp(&g_hud, &a->last_hud, sizeof(g_hud))) {
+                    rect_add(&region, a->last_hud.x0, a->last_hud.y0, a->last_hud.x1, a->last_hud.y1);
+                    rect_add(&region, g_hud.x0, g_hud.y0, g_hud.x1, g_hud.y1);
+               }
                if (region.x0 < 0) region.x0 = 0;
                if (region.y0 < 0) region.y0 = 0;
                if (region.x1 > a->W) region.x1 = a->W;
@@ -819,7 +852,7 @@ static void redraw(struct app *a, double now)
      if (partial)
           rect_add(&copy, a->last_region.x0, a->last_region.y0, a->last_region.x1, a->last_region.y1);
 
-     g_focus = g_aux = (struct rect){ 0, 0, 0, 0 };
+     g_focus = g_aux = g_hud = (struct rect){ 0, 0, 0, 0 };
      if (a->back && a->s->Lock(a->s, DSLF_WRITE, &ptr, &pitch) == DFB_OK && ptr) {
           struct canvas c = { a->back, a->W, a->W, a->H, partial,
                               region.x0, region.y0, region.x1, region.y1 };
@@ -845,10 +878,11 @@ static void redraw(struct app *a, double now)
      a->s->SetClip(a->s, NULL);
      double t2 = vibe_now_s();
      a->last_focus = g_focus;
+     a->last_hud = g_hud;
      a->last_region = region;
      a->last_screen = a->screen;
      a->have_frame = a->back != NULL;
-     a->want_aux = 0;
+     a->want_aux = a->want_hud = 0;
      if (shot_flag) {
           /* raw dump: "W H\n" then W*H ARGB words, little endian */
           FILE *f = fopen("/tmp/vibe-shot.raw", "wb");
@@ -873,6 +907,15 @@ static void redraw(struct app *a, double now)
 
 /* --------------------------------------------------------------- model */
 
+/* only a HUD changed (volume, no-signal notice): a partial redraw of its old
+ * and new place (a full one stays full) */
+static void mark_hud(struct app *a)
+{
+     a->want_hud = 1;
+     if (!a->dirty)
+          a->dirty = 2;
+}
+
 static void poll_inputs(struct app *a)
 {
      struct biz_input in[BIZ_MAX_INPUTS];
@@ -891,12 +934,49 @@ static void poll_inputs(struct app *a)
           for (int i = 0; i < n; i++)
                if (strcmp(in[i].id, "TV"))      /* the tuner is not used */
                     a->vis[a->nvis++] = i;
-          a->dirty = a->screen != S_NONE;
+          /* never clear a redraw already asked for (a volume key earlier
+           * in the same loop) */
+          if (a->screen != S_NONE)
+               a->dirty = 1;
      }
      if (cur[0] && strcmp(cur, a->cur)) {
           printf("current input: %s\n", cur);
           snprintf(a->cur, sizeof(a->cur), "%s", cur);
-          a->dirty = a->screen != S_NONE;
+          if (a->screen != S_NONE)
+               a->dirty = 1;
+     }
+}
+
+/*
+ * The "No signal" notice, checked every loop (no model reads: poll_inputs
+ * keeps in[] fresh). An input switch takes a moment to lock, so the
+ * signal must be missing for 3 s on the same input before it shows.
+ */
+static void check_signal(struct app *a, double now)
+{
+     int i;
+     for (i = 0; i < a->nin; i++)
+          if (!strcmp(a->in[i].id, a->cur))
+               break;
+     int lost = i < a->nin && strcmp(a->in[i].id, "TV") && a->in[i].signal != 1;
+     if (lost && (!a->nosig_lost || strcmp(a->nosig_cur, a->cur))) {
+          a->nosig_since = now;
+          snprintf(a->nosig_cur, sizeof(a->nosig_cur), "%s", a->cur);
+          printf("no signal on %s\n", a->cur);
+     } else if (!lost && a->nosig_lost) {
+          printf("signal on %s after %.1f s\n", a->nosig_cur, now - a->nosig_since);
+     }
+     a->nosig_lost = lost;
+
+     int show = lost && a->screen == S_NONE && now - a->nosig_since >= 3.0;
+     char text[96] = "";
+     if (show)
+          snprintf(text, sizeof(text), "%s \xc2\xb7 No signal", input_label(a, i));
+     if (show != a->nosig_shown || (show && strcmp(text, a->nosig_text))) {
+          printf("no-signal notice: %s\n", show ? text : "hidden");
+          a->nosig_shown = show;
+          snprintf(a->nosig_text, sizeof(a->nosig_text), "%s", text);
+          mark_hud(a);
      }
 }
 
@@ -966,7 +1046,7 @@ static void poll_volume(struct app *a, double now)
      if (a->vol_known && (vol != a->vol || mute != a->mute)) {
           printf("volume %d mute %d t=%.2f\n", vol, mute, now);
           a->vol_until = now + 2.5;
-          a->dirty = 1;
+          mark_hud(a);
      }
      a->vol = vol;
      a->mute = mute;
@@ -1433,7 +1513,7 @@ static void on_key(struct app *a, int k, int repeat, double now)
           a->vol_until = now + 2.5;
           if (!a->arc)
                a->next_vol = now + 0.5;
-          a->dirty = 1;
+          mark_hud(a);
           return;
      }
      case DIKS_HOME:
@@ -1749,8 +1829,11 @@ int main(int argc, char **argv)
           }
           if (now >= a->next_inputs) {
                poll_inputs(a);
-               a->next_inputs = now + (a->screen != S_NONE ? 1.0 : 3.0);
+               /* faster while a menu is open, or the input has no signal
+                * (the notice should go as soon as it returns) */
+               a->next_inputs = now + (a->screen != S_NONE || a->nosig_lost ? 1.0 : 3.0);
           }
+          check_signal(a, now);
           if (a->screen == S_SETTINGS && now >= a->next_pic) {
                poll_page(a);
                a->next_pic = now + 1.0;
@@ -1762,7 +1845,7 @@ int main(int argc, char **argv)
           }
           if (a->vol_until != last_vol_end && now >= a->vol_until) {
                last_vol_end = a->vol_until;
-               a->dirty = 1;
+               mark_hud(a);
           }
           dev_commands(a, now);
           if (shot_flag)
