@@ -857,6 +857,14 @@ reggieserver never started. Confirmed at 11.69 s (`hisenseUI` started,
 The browser still started (systemserver's autostart, lever 2) and was
 stopped at 22.7 s. SSH up, MemAvailable 899 MB.
 
+Then (owner checked the UI): `early.on` set, so the overlay applies every
+boot. Lever 2 (systemserver's autostart list) is not used: with `app_man`
+stopped at ~14 s, the services it lists for ~21.7 s are never started
+anyway, which leaves only the browser (~11 s, about 12 s of Chromium after
+`vibe-ui` is up), not worth touching a file that also holds the power-key
+map. Instead `debloat.sh` now passes every 2 s up to 40 s of uptime, so the
+browser is stopped within about 2 s of starting.
+
 Way back:
 - Stop using it: `rm /var/local/vibe/early.on /var/local/vibe/early.arm`
   (next boot; the current boot's mount is harmless, `app_man` read the

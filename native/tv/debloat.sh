@@ -11,9 +11,10 @@
 #   1. stops the processes in STOP (by /proc/<pid>/status Name, which is the
 #      first 15 characters of the program name), wrapper scripts first so
 #      they cannot restart their child. app_man does not relaunch them
-#      (measured with TTSPlayer). Passes repeat every 5 s for the first
-#      2 minutes after boot (some start late: QDA at about 28 s), then every
-#      60 s (in case something starts them again, e.g. after standby).
+#      (measured with TTSPlayer). Passes repeat every 2 s up to 40 s of
+#      uptime, every 5 s up to 2 minutes (some start late: the browser at
+#      about 11 s, QDA at about 28 s), then every 60 s (in case something
+#      starts them again, e.g. after standby).
 #      app_man respawns some at once; those are frozen (SIGSTOP) the second
 #      time they are seen, so they stay alive, unrespawned, using no CPU.
 #   1b. once vibe-ui runs, stops the stock UI's own pieces (STOP_UI:
@@ -244,5 +245,8 @@ while :; do
     ui_pass
     fw_ensure
     u=$(up); u=${u%.*}
-    if [ "$u" -lt 120 ]; then sleep 5; else sleep 60; fi
+    # every 2 s while the late starters appear (the browser ~11 s, started
+    # by systemserver, not app_man: the early overlay cannot stop it), then
+    # every 5 s to 2 minutes, then every minute
+    if [ "$u" -lt 40 ]; then sleep 2; elif [ "$u" -lt 120 ]; then sleep 5; else sleep 60; fi
 done
