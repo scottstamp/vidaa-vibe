@@ -37,6 +37,11 @@ fi
 off() { [ -f $V/off ] || [ -f /var/local/vibe-off ]; }
 if off; then echo "off switch present, not starting"; exit 0; fi
 
+# optional read-only boot probe (CEC timing), only if switched on
+if [ -f $V/cecmon.on ] && [ -f $V/cecmon.sh ]; then
+    $BB setsid /bin/sh $V/cecmon.sh </dev/null >/dev/null 2>&1 &
+fi
+
 # stop the unused stock services early, so they stop competing for the CPU
 # while we start. Once per boot (restart-ui.sh runs this script again); the
 # marker is on tmpfs. (Grepping every /proc/*/cmdline instead took 5.5 s.)

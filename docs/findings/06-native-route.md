@@ -778,6 +778,34 @@ So `debloat.sh` now stops these four (`STOP_UI`) once `vibe-ui` runs, with
 is gone. Slot B stays as it is: with `debloat.off` the blank engine runs again
 and still draws nothing.
 
+### CEC and the soundbar after boot (same with stock services)
+
+The owner saw CEC respond only about 30 s after the picture: the soundbar
+ignores volume and switching to HDMI2 does not wake the Google TV box until
+then. `native/tv/cecmon.sh` (started by `boot.sh` while
+`/var/local/vibe/cecmon.on` exists; read-only) sampled `cec.functionality`,
+`cec.arc.activemode`, `sound.arcdev.exist`, `sound.speaker.arc.mode` and
+`sound.main.volume`, and kept the kernel's CEC/ARC lines:
+
+| | ours (debloat on) | stock services (`debloat.off`) |
+| --- | --- | --- |
+| kernel `Set ARC mode: 0->1`, eARC mode | 10.3 s | 10.7 s |
+| `speaker.arc.mode` 1 → 2 | 26.9 s | between 22.7 and 30.4 s |
+| soundbar's audio formats registered, `arcdev.exist` = 1 | 31.3 s | 31.9 s |
+
+`cec.functionality` is 1 from 8 s. So the 20 s wait is the TV's eARC/CEC
+handshake with the soundbar, done by `tvmain` and the MI layer; our changes
+do not cause it, and the owner found it, if anything, slower with stock
+services. Until the soundbar is found the TV treats its speakers as the
+output: volume keys change the TV speaker volume (vibe-ui wrote 9 → 11 then).
+
+The TV queues CEC key presses while the link is down or busy. On the
+stock-services boot the owner pressed VOL+ three times (soundbar 12 → 18),
+then VOL- about 20 times over 20 s with no effect, then the soundbar went
+18 → 21 → 25 → 21 → 18 → 15 → 12: queued presses delivered late (owner's
+reading). vibe-ui sends nothing to the soundbar in ARC mode, so this is the
+system's CEC path. Not seen on boots with debloat on.
+
 ### Way back (written before the change)
 
 - Everything is in memory. A reboot without `debloat.sh` brings every
