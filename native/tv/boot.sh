@@ -37,22 +37,27 @@ fi
 off() { [ -f $V/off ] || [ -f /var/local/vibe-off ]; }
 if off; then echo "off switch present, not starting"; exit 0; fi
 
-# vibe-ui's own state (e.g. "a soundbar is normally connected"), owned by
-# the UI user it runs as, never by root
-mkdir -p $V/state && chown 311:311 $V/state && chmod 755 $V/state
-
-# optional read-only boot probe (CEC timing), only if switched on
-if [ -f $V/cecmon.on ] && [ -f $V/cecmon.sh ]; then
-    $BB setsid /bin/sh $V/cecmon.sh </dev/null >/dev/null 2>&1 &
-fi
-
-# stop the unused stock services early, so they stop competing for the CPU
-# while we start. Once per boot (restart-ui.sh runs this script again); the
-# marker is on tmpfs. (Grepping every /proc/*/cmdline instead took 5.5 s.)
+# First: stop the unused stock services and put the Hisense block in place,
+# early, so they stop competing for the CPU while we start. Once per boot
+# (restart-ui.sh runs this script again); the marker is on tmpfs. (Grepping
+# every /proc/*/cmdline instead took 5.5 s.)
 if [ -f $V/debloat.sh ] && [ ! -f /tmp/vibe-debloat.started ]; then
     : > /tmp/vibe-debloat.started
     $BB setsid /bin/sh $V/debloat.sh </dev/null >/dev/null 2>&1 &
     echo "debloat.sh started at uptime $(up)"
+fi
+
+# vibe-ui's own state (e.g. "a soundbar is normally connected"), owned by
+# the UI user it runs as, never by root. Made once, not on every boot: early
+# in a boot each extra command costs time (debloat.sh started 0.47 s after
+# boot.sh with this step ahead of it, unmeasured how much was this step).
+if [ ! -d $V/state ]; then
+    mkdir -p $V/state && chown 311:311 $V/state && chmod 755 $V/state
+fi
+
+# optional read-only boot probe (CEC timing), only if switched on
+if [ -f $V/cecmon.on ] && [ -f $V/cecmon.sh ]; then
+    $BB setsid /bin/sh $V/cecmon.sh </dev/null >/dev/null 2>&1 &
 fi
 
 # wait for app_man to have the stock engine up: the DirectFB world exists
