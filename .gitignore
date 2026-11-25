@@ -1,0 +1,66 @@
+server/keys/
+server/iconcache/
+server/recon-report*.json
+launcher/recon-captures/
+server/.paired
+server/.host
+server/.home_watch_off
+server/config.local.json
+server/venv/
+__pycache__/
+*.pyc
+.DS_Store
+# firmware/ is private operational material — pulled stock bundles, partition
+# dumps, the live endpoint working copy (ENDPOINTS.md). Three files inside are
+# deliberately public and tracked: the AdGuard how-to, its per-client
+# blocklist for the TV, and the on-TV firewall policy source (tvfw, deployed
+# to /var/local/tvfw by hand).
+firmware/*
+!firmware/ADGUARD_APPLY.md
+!firmware/adguard-blocklist.txt
+!firmware/tvfw
+
+# private research working notes; the public record lives in docs/research/
+/research/
+
+# native/ build output and fetched deps (vendor libraries, DirectFB tarball)
+native/.deps/
+native/out/
+
+# native bridge build output
+bridge/dist/
+bridge/bridge
+
+# generated docs site (scripts/gen-site.py; published by .github/workflows/pages.yml)
+site/
+
+# tools/u7q build output and runtime artifacts (no vendor binaries shipped)
+tools/u7q/bin/
+tools/u7q/web/pub/
+tools/u7q/web/captures/
+tools/u7q/web/server.log
+
+# tools/ur9s build output and runtime artifacts (no vendor binaries shipped)
+tools/ur9s/bin/
+tools/ur9s/web/pub/
+tools/ur9s/web/captures/
+tools/ur9s/web/server.log
+
+# tools/ur9s offline build sources and build tree (tarballs are not shipped —
+# see tools/ur9s/sources/README.md)
+tools/ur9s/sources/*.tar.gz
+tools/ur9s/build/
+
+
+# tools/audio build output (probe binary + pulled libasound)
+tools/audio/dist/
+launcher/pub/installer.ipk
+launcher/pub/*.ipk
+launcher/pub/ipk/*.ipk
+tools/alvidaa_ipk/*.ipk
+
+# 65A85Q session working data: collected TV files (vendor text) land quoted in
+# docs/models/65A85QEVS/*/FINDINGS.md; raw dumps stay local like /research/
+tvcollect/
+tvroot*.out
+/pub/

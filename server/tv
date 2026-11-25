@@ -1,0 +1,24 @@
+#!/bin/sh
+# Root shell/one-shot into the TV over dropbear (port 2222).
+#   server/tv                    -> interactive root shell (PATH fixed)
+#   server/tv 'cat /proc/mounts' -> one-shot command
+# Host: $TV_HOST, default 192.168.0.11. The TV is DHCP-shuffled (see the
+# LAUNCHER_V2 post-mortem) — set TV_HOST whenever it moves. Never assume
+# 192.168.0.12: that address now belongs to another device on the LAN.
+# The dropbear session does not run /etc/profile, so PATH is set here.
+# TV_NOPTY=1: interactive shell without a terminal, for firmware whose kernel
+# has no ptys (58A51HUV U6). The -t below is an explicit request, and ssh
+# exits 255 when an explicit request is refused ("PTY allocation request
+# failed"), whatever the server does next. No remote line editing or job
+# control in that mode.
+KEY="$(dirname "$0")/keys/tv_root_ed25519"
+TV="${TV_HOST:-192.168.0.11}"
+FIX="export PATH=/usr/local/bin:/usr/local/scripts:/bin:/usr/bin:/sbin:/usrbin:/opt/bin:/3rd/bin/wpa_supplicant/common:\$PATH;"
+TTY=-t
+[ -n "${TV_NOPTY:-}" ] && TTY=-T
+if [ $# -eq 0 ]; then
+    exec ssh $TTY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -p 2222 -i "$KEY" root@"$TV" "$FIX exec /bin/sh -i"
+fi
+exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -p 2222 -i "$KEY" root@"$TV" "$FIX $*"
