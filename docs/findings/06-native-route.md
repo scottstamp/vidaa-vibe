@@ -710,6 +710,13 @@ Way back: `touch /var/local/vibe/wait-engine` brings back the old wait for
 `hisenseUI`. It only matters at boot, so it takes effect at the next
 reboot.
 
+First boot with it (2026-11-25): `boot.sh` 8.67 s (a late boot), world
+found 8.99 s, `vibe-ui` 9.55 s; `hisenseUI` was already up (pid seen in the
+same line), so no gain this time; the engine and the other stock UI pieces
+were stopped at 18.3 s as before, `websdk` at 12.2 s. HDMI3 locked 2.2 s after
+start, under the notice's 3 s, so no false "No signal". On boots where
+the engine comes later the gain is up to ~1.8 s; not yet measured.
+
 ## More settings: HDMI format, picture reset, no-signal standby
 
 From the stock bundle and `libcobalt.so` (research agent, checked by hand
