@@ -25,6 +25,7 @@
  * empty page), so nothing else draws or acts on keys.
  *
  * usage: vibe-ui [--user=UID:GID[:G,...]] [--timeout=S] [--layer=N] [--gam]
+ *               [--gam-name=NAME]   (implies --gam; default name "vibe")
  *   --timeout: exit after S seconds (default 600, 0 = never). A watchdog
  *   alarm kills the process 10 s after it.
  */
@@ -113,6 +114,7 @@ struct app {
      double next_inputs, next_vol, next_pic;
      int  dirty;
      int  gam;
+     const char *gam_name;
 };
 
 #define CHECK(what, call)                                                    \
@@ -751,6 +753,7 @@ int main(int argc, char **argv)
           else if (!strncmp(argv[i], "--timeout=", 10)) timeout = atoi(argv[i] + 10);
           else if (!strncmp(argv[i], "--layer=", 8))    layer = atoi(argv[i] + 8);
           else if (!strcmp(argv[i], "--gam"))           a->gam = 1;
+          else if (!strncmp(argv[i], "--gam-name=", 11)) { a->gam = 1; a->gam_name = argv[i] + 11; }
           else {
                fprintf(stderr, "usage: vibe-ui [--user=UID:GID[:G,...]] [--timeout=S] [--layer=N] [--gam]\n");
                return 2;
@@ -786,9 +789,13 @@ int main(int argc, char **argv)
             a->nin, a->cur, a->vol, a->mute, a->pic[0], (vibe_now_s() - t0) * 1000);
 
      if (a->gam) {
-          if (gam_open("vibe", gam_on_sync, gam_on_async) == 0) {
-               int r = gam_send_cmd("am", "started", "vibe");
-               printf("gam: client 'vibe' up, started -> r=%d\n", r);
+          const char *gn = a->gam_name ? a->gam_name : "vibe";
+          if (gam_open(gn, gam_on_sync, gam_on_async) == 0) {
+               char buf[128];
+               int r = gam_send_cmd("am", "started", gn);
+               printf("gam: client '%s' up, started -> r=%d\n", gn, r);
+               gam_focus_process(buf, sizeof(buf));
+               printf("gam: focus process now '%s'\n", buf);
           } else {
                printf("gam: not available, going on without it\n");
                a->gam = 0;

@@ -5,6 +5,8 @@
 # Switches, checked at start (and between restarts):
 #   /var/local/vibe/off     do not start vibe-ui (create over SSH)
 #   /var/local/vibe-off     same, in a place the browser bridge can write
+#   /var/local/vibe/ui.args extra vibe-ui flags, one line (e.g. --gam), read
+#                           before each start
 #   /var/local/vibe-stock   put the stock UI back: restore the original
 #                           appRunTimeInfoFile.json (runFlag 0) in place, do
 #                           not start vibe-ui. Takes effect at the next boot.
@@ -46,7 +48,9 @@ while [ $n -lt 10 ]; do
     off && { echo "off switch seen, stopping"; exit 0; }
     n=$((n+1))
     echo "start vibe-ui (run $n) at uptime $(up)"
-    VIBE_BIN=vibe-ui $V/vibe-run.sh --timeout=0 >/dev/null 2>&1
+    ARGS=$(cat $V/ui.args 2>/dev/null)
+    echo "  args: $ARGS"
+    VIBE_BIN=vibe-ui $V/vibe-run.sh --timeout=0 $ARGS >/dev/null 2>&1
     echo "vibe-ui exited rc=$? at uptime $(up)"
     sleep $((n * 3))
 done

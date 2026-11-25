@@ -51,6 +51,9 @@ and was not observed.
 | `busybox tee` is not an applet here | Hit | Redirect to a file, then `cat` it |
 | BACK and some unnamed keys arrive twice: the second copy comes from the IR device (15) with `key_code` −1 | Hit | Drop a repeat with code −1 |
 | Volume and mute keys act on the TV even while our window has focus (and receives them too), **but only because the stock UI does it**. With the stock UI blanked (slot B), nothing changes the volume | Hit | Our app sets `kilby.sl2.i32.sound.main.volume` / `.mute` itself |
+| Rewriting a running shell script in place (`cat > boot.sh`) can make bash execute garbage, because it reads the file as it runs | Avoided | `native/deploy.sh` writes `X.new` and renames it over `X` |
+| A shared log file for every tool (`last.log`) let a tool run truncate the running UI's log (NUL bytes in it afterwards) | Hit | One log per binary: `last-<binary>.log` |
+| `tail`, `tr`, `uniq` are missing too; piping a script into a missing command killed the script with SIGPIPE before it did anything | Hit | Use `$BB tail`; avoid pipes into unverified commands |
 | `cut` is not on the TV's PATH (busybox only); a wait-for-SSH loop that ran `cut` remotely read every answer as "down" | Hit | Use `$BB cut` in remote commands, or test the port (`bash -c 'echo > /dev/tcp/HOST/2222'`) |
 | Files **created** on `/var/local` shortly before a mains power cut came back **empty** (the slot B backups, 276 → 0 bytes); files rewritten in place survived. An unchecked restore then emptied `appRunTimeInfoFile.json` | Hit | `sync` after every write that matters; check a backup's md5 before restoring from it |
 | `kilby.action.system.switch.off.tv` puts the TV into a fast standby that, with the stock page blanked, POWER does not wake | Hit | Do not send it. Set `kilby.sl2.i32.system.gui.loop.finished` to 1 at UI start instead: then the system handles POWER both ways by itself |

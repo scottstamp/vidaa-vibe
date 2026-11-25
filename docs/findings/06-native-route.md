@@ -589,6 +589,36 @@ remote, with Linux and every process up throughout, exactly as on stock.
 itself loaded, the system takes POWER before any window does. Our app does
 nothing for power; it only sets the flag at start.
 
+## The UI, and registering with app_man
+
+2026-11-25. `vibe-ui` grew a Home screen (Inputs and Settings rows), a
+Picture panel and an input rename list. The owner tested all of them and
+they work. Keys and actions were taken from `libcobalt.so` with
+`native/tools/modeljs_keys.py`:
+
+| What | Model key or action | Arguments, values |
+| --- | --- | --- |
+| picture mode (read) | `kilby.sl2.i32.video.enum.picture.adjustment` | 0 Dynamic, 1 Standard, 2 Cinema Night, 3 Cinema Day, 4 Game, 5 Sport, 6 Calibrated (11 IMAX) |
+| picture mode (set) | action `kilby.sl2.action.video.set.picture.adjustment` | `[mode, "1", "1"]` (stock `SetPictureAdjustment([e,1,1])`) |
+| backlight, brightness, contrast | `kilby.sl2.i32.video.backlight` / `.brightness` / `.contrast` | 0..100 |
+| colour, sharpness | `kilby.sl2.i32.video.colour.intensity` / `.sharpness` | 0..100 |
+| rename an input | action `kilby.sl2.action.source.input.rename` | `[sourceId, newName]` |
+
+Registering with `app_man` (GAM, `native/src/gam.c`, `vibe-ui --gam` and
+`--gam-name=`):
+- As "vibe" and as "dockui" (a name in `am_config`), `GAM_ClientInit` and
+  `GAM_SendCmd({am: started})` both returned 0. **Nothing else changed:**
+  neither name entered `app_man`'s process list (still the 45 apps of
+  `application_context`), focus and active process stayed `NotFound`, and
+  no callbacks arrived. `app_man` tracks only processes it started itself,
+  and `am_config` is read-only.
+- While connected, POWER also reached `vibe-ui`'s window. Standby and wake
+  still worked (owner test).
+- Registration is therefore **off** (empty `/var/local/vibe/ui.args`): it
+  adds a half-known client and nothing we need. Keys and focus come through
+  the DirectFB window, POWER through the system, and the app shortcut keys
+  do nothing (owner).
+
 ## Way back
 
 `vibe` and `vibe-model` change nothing persistent themselves. Their only

@@ -12,9 +12,11 @@ $SSH 'mkdir -p /var/local/vibe && chmod 755 /var/local/vibe'
 for b in vibe vibe-model vibe-ui vibe-gam; do
     $SSH "cat > /var/local/vibe/$b.new && chmod 755 /var/local/vibe/$b.new && mv /var/local/vibe/$b.new /var/local/vibe/$b" < out/$b
 done
-$SSH 'cat > /var/local/vibe/vibe-run.sh && chmod 755 /var/local/vibe/vibe-run.sh' < tv/vibe-run.sh
-for f in boot.sh hook-patch.sh; do
-    $SSH "cat > /var/local/vibe/$f && chmod 755 /var/local/vibe/$f" < tv/$f
+# scripts may be running (boot.sh, vibe-run.sh): bash reads them as it goes,
+# so never rewrite one in place; write a new file and rename it over
+for f in vibe-run.sh boot.sh hook-patch.sh powermon.sh restart-ui.sh; do
+    $SSH "cat > /var/local/vibe/$f.new && chmod 755 /var/local/vibe/$f.new && mv /var/local/vibe/$f.new /var/local/vibe/$f" < tv/$f
 done
+$SSH 'sync'
 $SSH 'ls -la /var/local/vibe; md5sum /var/local/vibe/vibe /var/local/vibe/vibe-model /var/local/vibe/vibe-ui'
 md5sum out/vibe out/vibe-model out/vibe-ui
