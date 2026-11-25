@@ -12,6 +12,9 @@ struct canvas {
      uint32_t *px;
      int pitch;          /* in pixels */
      int w, h;
+     /* optional clip: when clipped, nothing outside [x0,x1) x [y0,y1) is
+      * touched (an empty box draws nothing). Zero-initialised: no clip. */
+     int clipped, clip_x0, clip_y0, clip_x1, clip_y1;
 };
 
 /* colour helpers: 0xAARRGGBB */
@@ -22,6 +25,7 @@ static inline uint32_t argb(int a, int r, int g, int b)
 uint32_t gfx_with_alpha(uint32_t c, int a);
 uint32_t gfx_mix(uint32_t c0, uint32_t c1, int t /* 0..255 */);
 
+/* transparent black over the canvas (or its clip box) */
 void gfx_clear(struct canvas *c);
 
 /* vertical gradient over the whole canvas, written (not blended) */

@@ -669,6 +669,20 @@ and forced a full redraw; keys waited behind it. Now zeroed.
 Result: keyboard frame ~112 ms (shapes 71, text 14, flip ~25 with
 `DSFLIP_WAITFORSYNC`), down from ~400 ms, and no redraws without a cause.
 
+Partial frames, for focus moves, typing and settings value changes
+(`dirty == 2`): the RAM buffer keeps the whole last frame; a measuring pass
+with an empty clip (`struct canvas` has an optional clip box now) records
+the new focus rectangle (`focus_fill`, the focused settings row, the
+keyboard's text field when typing); only old focus ∪ new focus is drawn
+again, and the surface gets that plus the previous frame's region (the
+window is double buffered). Text is drawn with the surface clip set to the
+same area, so it is never blended twice. A list that scrolls, Shift on the
+keyboard, or anything else redraws in full. Measured: keyboard focus move
+15–31 ms, typing ~65 ms (field and key in one bounding box), Home and
+settings moves similar; full frames ~105–115 ms. Screenshots after a series
+of partial frames (the dev "shot" is now a partial frame too) showed no
+leftover focus glow and no doubled text.
+
 ## More settings, and volume with a soundbar
 
 2026-11-25. New pages, with keys taken from `libcobalt.so`
@@ -932,8 +946,10 @@ at 8.0 s, nat `VIBE_OUT` hooked at 10.9 s and never again (no wipe); `tvmain`
 ran its EULA firewall setup at 9.7–9.8 s ("set firewall by eula" in
 syslog), before our hook. Filter `INPUT` held the SSH rule. Still not tested:
 the uid rules with a live process (the blocked services are dead within
-13 s). Building the chain takes about 3 s at boot (33 `iptables` runs); the
-block covers nothing before 10.9 s.
+13 s). Building the chain took about 3 s at boot (33 `iptables` runs). It is now
+one `iptables-restore --noflush` commit, chain and hook together (the TV's
+`iptables` is multi-call: `exec -a iptables-restore`); 0.08 s from script
+start on an idle TV. Not yet measured at boot.
 
 ### Way back (written before the change)
 

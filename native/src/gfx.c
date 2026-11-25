@@ -53,18 +53,43 @@ static inline void over(uint32_t *d, uint32_t src, int cov)
      *d = r | (uint32_t)oa << 24;
 }
 
+/* the pixels a primitive may touch: the box [x, x+w) x [y, y+h) cut to the
+ * canvas and its clip. Returns 0 if nothing is left. */
+static int bounds(const struct canvas *c, int x, int y, int w, int h,
+                  int *x0, int *y0, int *x1, int *y1)
+{
+     int bx0 = 0, by0 = 0, bx1 = c->w, by1 = c->h;
+     if (c->clipped) {
+          if (c->clip_x0 > bx0) bx0 = c->clip_x0;
+          if (c->clip_y0 > by0) by0 = c->clip_y0;
+          if (c->clip_x1 < bx1) bx1 = c->clip_x1;
+          if (c->clip_y1 < by1) by1 = c->clip_y1;
+     }
+     *x0 = x > bx0 ? x : bx0;
+     *y0 = y > by0 ? y : by0;
+     *x1 = x + w < bx1 ? x + w : bx1;
+     *y1 = y + h < by1 ? y + h : by1;
+     return *x0 < *x1 && *y0 < *y1;
+}
+
 void gfx_clear(struct canvas *c)
 {
-     for (int y = 0; y < c->h; y++)
-          memset(c->px + (size_t)y * c->pitch, 0, (size_t)c->w * 4);
+     int x0, y0, x1, y1;
+     if (!bounds(c, 0, 0, c->w, c->h, &x0, &y0, &x1, &y1))
+          return;
+     for (int y = y0; y < y1; y++)
+          memset(c->px + (size_t)y * c->pitch + x0, 0, (size_t)(x1 - x0) * 4);
 }
 
 void gfx_fill_vgradient_full(struct canvas *c, uint32_t top, uint32_t bottom)
 {
-     for (int y = 0; y < c->h; y++) {
+     int x0, y0, x1, y1;
+     if (!bounds(c, 0, 0, c->w, c->h, &x0, &y0, &x1, &y1))
+          return;
+     for (int y = y0; y < y1; y++) {
           uint32_t col = gfx_mix(top, bottom, y * 255 / (c->h - 1));
           uint32_t *row = c->px + (size_t)y * c->pitch;
-          for (int x = 0; x < c->w; x++)
+          for (int x = x0; x < x1; x++)
                row[x] = col;
      }
 }
@@ -93,8 +118,9 @@ static void rrect_impl(struct canvas *c, int x, int y, int w, int h, int r,
           return;
      if (r * 2 > w) r = w / 2;
      if (r * 2 > h) r = h / 2;
-     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
-     int x1 = x + w > c->w ? c->w : x + w, y1 = y + h > c->h ? c->h : y + h;
+     int x0, y0, x1, y1;
+     if (!bounds(c, x, y, w, h, &x0, &y0, &x1, &y1))
+          return;
      for (int py = y0; py < y1; py++) {
           uint32_t *row = c->px + (size_t)py * c->pitch;
           int in_corner_band = py < y + r || py >= y + h - r;
@@ -131,9 +157,9 @@ void gfx_shadow(struct canvas *c, int x, int y, int w, int h, int r, int spread,
      if (r * 2 > w) r = w / 2;
      if (r * 2 > h) r = h / 2;
      int a0 = colour >> 24;
-     int X0 = x - spread < 0 ? 0 : x - spread, Y0 = y - spread < 0 ? 0 : y - spread;
-     int X1 = x + w + spread > c->w ? c->w : x + w + spread;
-     int Y1 = y + h + spread > c->h ? c->h : y + h + spread;
+     int X0, Y0, X1, Y1;
+     if (!bounds(c, x - spread, y - spread, w + 2 * spread, h + 2 * spread, &X0, &Y0, &X1, &Y1))
+          return;
      float lx = x + r, rx = x + w - r, ty = y + r, by = y + h - r;
      /* alpha by whole-pixel distance, computed once */
      int lut[256];
@@ -177,8 +203,9 @@ void gfx_rrect_outline(struct canvas *c, int x, int y, int w, int h, int r, int 
      if (r * 2 > w) r = w / 2;
      if (r * 2 > h) r = h / 2;
      int ri = r - t < 0 ? 0 : r - t;
-     int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
-     int x1 = x + w > c->w ? c->w : x + w, y1 = y + h > c->h ? c->h : y + h;
+     int x0, y0, x1, y1;
+     if (!bounds(c, x, y, w, h, &x0, &y0, &x1, &y1))
+          return;
      int band = r > t ? r : t;          /* only rows/columns near an edge matter */
      for (int py = y0; py < y1; py++) {
           uint32_t *row = c->px + (size_t)py * c->pitch;

@@ -149,6 +149,8 @@ static const char *const kb_act_name[KB_NACT] = { "Shift", "Space", "Delete", "D
  * created by boot.sh, owned by the UI user) */
 #define STATE_BAR "/var/local/vibe/state/soundbar"
 
+struct rect { int x0, y0, x1, y1; };      /* empty when x0 >= x1 */
+
 struct app {
      IDirectFB             *dfb;
      IDirectFBDisplayLayer *layer;
@@ -158,6 +160,11 @@ struct app {
      IDirectFBFont         *f_title, *f_head, *f_item, *f_bold, *f_small, *f_tiny;
      int W, H;
      uint32_t *back;              /* W*H ARGB drawing buffer in RAM */
+     /* partial redraws (dirty == 2): only the old and new focus (and, with
+      * want_aux, the keyboard's text field) are drawn again */
+     int  want_aux, have_frame;
+     int  last_screen;
+     struct rect last_focus, last_region;
 
      /* model state */
      struct biz_input in[BIZ_MAX_INPUTS];
@@ -286,9 +293,32 @@ static void sheet(struct app *a, cv_t *c, int x, int y, int w, int h, const char
      }
 }
 
+/* ---- partial redraws: what a focus move or typing touches */
+static struct rect g_focus;               /* focused element(s) of this frame */
+static struct rect g_aux;                 /* the keyboard's text field */
+
+static int rect_empty(struct rect r) { return r.x0 >= r.x1 || r.y0 >= r.y1; }
+
+static void rect_add(struct rect *r, int x0, int y0, int x1, int y1)
+{
+     if (x0 >= x1 || y0 >= y1)
+          return;
+     if (rect_empty(*r)) {
+          *r = (struct rect){ x0, y0, x1, y1 };
+          return;
+     }
+     if (x0 < r->x0) r->x0 = x0;
+     if (y0 < r->y0) r->y0 = y0;
+     if (x1 > r->x1) r->x1 = x1;
+     if (y1 > r->y1) r->y1 = y1;
+}
+
+#define FOCUS_GLOW 24                     /* focus_fill's shadow spread, and a bit */
+
 /* the focus look: gradient pill with a soft glow */
 static void focus_fill(cv_t *c, int x, int y, int w, int h, int r)
 {
+     rect_add(&g_focus, x - FOCUS_GLOW, y - FOCUS_GLOW, x + w + FOCUS_GLOW, y + h + FOCUS_GLOW);
      gfx_shadow(c, x, y, w, h, r, 22, K_GLOW);
      gfx_rrect_hgrad(c, x, y, w, h, r, K_ACCENT_L, K_ACCENT_R);
 }
@@ -490,8 +520,11 @@ static void draw_settings(struct app *a, cv_t *c)
           const struct setting_row *r = &p->rows[a->vis_row[j]];
           int v = a->val[a->vis_row[j]];
           int y = top + j * (row_h + 8), sel = j == a->sel;
-          if (c && sel)
+          if (c && sel) {
+               /* the whole row is focus: its highlight, the slider knob */
+               rect_add(&g_focus, rx, y, rx + rw, y + row_h);
                gfx_rrect(c, rx, y, rw, row_h, 24, K_CARD_HI);
+          }
           if (r->kind == R_CHOICE) {
                const char *m = a->val_known ? choice_name(r, v) : "...";
                int pw = 320, px = rx + rw - 28 - pw, ph = 56, py = y + (row_h - ph) / 2;
@@ -621,6 +654,7 @@ static void draw_keyboard(struct app *a, cv_t *c)
      int fy = y0 + 150, fh = 100;
      int tw = text_width(a->f_bold, a->kb_text);
      if (c) {
+          rect_add(&g_aux, rx - 2, fy - 2, rx + rw + 2, fy + fh + 2);
           gfx_rrect(c, rx, fy, rw, fh, 24, K_CARD);
           gfx_rrect_outline(c, rx, fy, rw, fh, 24, 2, K_ACCENT_L);
           gfx_rrect(c, rx + 36 + tw + 4, fy + 26, 4, fh - 52, 2, K_ACCENT_R);
@@ -739,20 +773,75 @@ static void redraw(struct app *a, double now)
       * took ~260 ms, in RAM ~60 ms (native/tools/gfx_bench.c). */
      if (!a->back)
           a->back = malloc((size_t)a->W * a->H * 4);
+
+     /*
+      * Partial frame (dirty == 2: a focus move, or typing): the RAM buffer
+      * holds the whole previous frame, so only the old focus and the new one
+      * (and the text field when typing) are drawn again. A measuring pass
+      * with an empty clip finds the new focus without drawing; a list that
+      * scrolled (top moved) needs the full frame. The window is double
+      * buffered, so the surface gets this frame's region and the last one's.
+      */
+     struct rect full = { 0, 0, a->W, a->H }, region = full;
+     int partial = a->dirty == 2 && a->have_frame && a->back &&
+                   (int)a->screen == a->last_screen;
+     if (partial) {
+          struct canvas m = { a->back, a->W, a->W, a->H, 1, 0, 0, 0, 0 };
+          int top = a->top;
+          g_focus = g_aux = (struct rect){ 0, 0, 0, 0 };
+          draw_screens(a, &m, now);
+          if (a->top != top) {
+               partial = 0;
+          } else {
+               region = a->last_focus;
+               rect_add(&region, g_focus.x0, g_focus.y0, g_focus.x1, g_focus.y1);
+               if (a->want_aux)
+                    rect_add(&region, g_aux.x0, g_aux.y0, g_aux.x1, g_aux.y1);
+               if (region.x0 < 0) region.x0 = 0;
+               if (region.y0 < 0) region.y0 = 0;
+               if (region.x1 > a->W) region.x1 = a->W;
+               if (region.y1 > a->H) region.y1 = a->H;
+               if (rect_empty(region))
+                    partial = 0;
+          }
+     }
+     if (!partial)
+          region = full;
+     /* what the surface needs: this frame's region and the previous one */
+     struct rect copy = region;
+     if (partial)
+          rect_add(&copy, a->last_region.x0, a->last_region.y0, a->last_region.x1, a->last_region.y1);
+
+     g_focus = g_aux = (struct rect){ 0, 0, 0, 0 };
      if (a->back && a->s->Lock(a->s, DSLF_WRITE, &ptr, &pitch) == DFB_OK && ptr) {
-          struct canvas c = { a->back, a->W, a->W, a->H };
+          struct canvas c = { a->back, a->W, a->W, a->H, partial,
+                              region.x0, region.y0, region.x1, region.y1 };
           gfx_clear(&c);                        /* transparent: the picture shows */
           draw_screens(a, &c, now);
-          for (int y = 0; y < a->H; y++)
-               memcpy((char *)ptr + (size_t)y * pitch, a->back + (size_t)y * a->W, (size_t)a->W * 4);
+          size_t bytes = (size_t)(copy.x1 - copy.x0) * 4;
+          for (int y = copy.y0; y < copy.y1; y++)
+               memcpy((char *)ptr + (size_t)y * pitch + (size_t)copy.x0 * 4,
+                      a->back + (size_t)y * a->W + copy.x0, bytes);
           a->s->Unlock(a->s);
      } else {
           a->s->Clear(a->s, 0, 0, 0, 0);
+          partial = 0;
+          copy = region = full;
      }
      double t1 = vibe_now_s();
+     /* text only where pixels were just replaced: elsewhere it is already
+      * there, and drawing it again would blend it twice */
+     DFBRegion clip = { copy.x0, copy.y0, copy.x1 - 1, copy.y1 - 1 };
+     a->s->SetClip(a->s, partial ? &clip : NULL);
      a->s->SetDrawingFlags(a->s, DSDRAW_BLEND);
      draw_screens(a, NULL, now);
+     a->s->SetClip(a->s, NULL);
      double t2 = vibe_now_s();
+     a->last_focus = g_focus;
+     a->last_region = region;
+     a->last_screen = a->screen;
+     a->have_frame = a->back != NULL;
+     a->want_aux = 0;
      if (shot_flag) {
           /* raw dump: "W H\n" then W*H ARGB words, little endian */
           FILE *f = fopen("/tmp/vibe-shot.raw", "wb");
@@ -769,9 +858,10 @@ static void redraw(struct app *a, double now)
      a->s->Flip(a->s, NULL, DSFLIP_WAITFORSYNC);
      a->dirty = 0;
      if (getenv("VIBE_TIMING"))
-          printf("frame %.0f ms (shapes %.0f, text %.0f, flip %.0f)\n",
+          printf("frame %.0f ms (shapes %.0f, text %.0f, flip %.0f) %s %dx%d\n",
                  (vibe_now_s() - t0) * 1000, (t1 - t0) * 1000, (t2 - t1) * 1000,
-                 (vibe_now_s() - t2) * 1000);
+                 (vibe_now_s() - t2) * 1000, partial ? "partial" : "full",
+                 copy.x1 - copy.x0, copy.y1 - copy.y0);
 }
 
 /* --------------------------------------------------------------- model */
@@ -964,12 +1054,19 @@ static void switch_to(struct app *a, int idx, double now)
      toast(a, input_label(a, idx), now);
 }
 
+/* only the focus moved: a partial redraw (a full one stays full) */
+static void mark_focus(struct app *a)
+{
+     if (!a->dirty)
+          a->dirty = 2;
+}
+
 static void list_move(struct app *a, int n, int d)
 {
      int s = a->sel + d;
      if (s >= 0 && s < n) {
           a->sel = s;
-          a->dirty = 1;
+          mark_focus(a);                /* redraw() goes full if the list scrolls */
      }
 }
 
@@ -977,13 +1074,13 @@ static void key_home(struct app *a, int k, double now)
 {
      int ncol = a->row == 0 ? a->nvis : N_SETTINGS;
      switch (k) {
-     case DIKS_CURSOR_LEFT:  if (a->col > 0) { a->col--; a->dirty = 1; } break;
-     case DIKS_CURSOR_RIGHT: if (a->col + 1 < ncol) { a->col++; a->dirty = 1; } break;
+     case DIKS_CURSOR_LEFT:  if (a->col > 0) { a->col--; mark_focus(a); } break;
+     case DIKS_CURSOR_RIGHT: if (a->col + 1 < ncol) { a->col++; mark_focus(a); } break;
      case DIKS_CURSOR_UP:
-          if (a->row > 0) { a->row = 0; if (a->col >= a->nvis) a->col = a->nvis - 1; a->dirty = 1; }
+          if (a->row > 0) { a->row = 0; if (a->col >= a->nvis) a->col = a->nvis - 1; mark_focus(a); }
           break;
      case DIKS_CURSOR_DOWN:
-          if (a->row < 1) { a->row = 1; if (a->col >= N_SETTINGS) a->col = N_SETTINGS - 1; a->dirty = 1; }
+          if (a->row < 1) { a->row = 1; if (a->col >= N_SETTINGS) a->col = N_SETTINGS - 1; mark_focus(a); }
           break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
           if (a->row == 0 && a->col < a->nvis) {
@@ -1012,7 +1109,7 @@ static void key_quick(struct app *a, int k, double now)
      case DIKS_CURSOR_UP:   list_move(a, a->nvis, -1); break;
      case DIKS_CURSOR_DOWN: list_move(a, a->nvis, +1); break;
      case KEY_INPUT:
-          if (a->nvis) { a->sel = (a->sel + 1) % a->nvis; a->dirty = 1; }
+          if (a->nvis) { a->sel = (a->sel + 1) % a->nvis; mark_focus(a); }
           break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
           if (a->sel < a->nvis)
@@ -1064,9 +1161,10 @@ static void key_settings(struct app *a, int k, int repeat, double now)
      rc = r->set ? r->set(v) : biz_set_int(r->key, v);
      printf("%s: %s = %d -> r=%d\n", p->title, r->name, v, rc);
      a->val[ri] = v;
-     /* a change can move other rows (picture mode moves the sliders) */
+     /* a change can move other rows (picture mode moves the sliders); the
+      * poll that follows redraws in full if they did */
      a->next_pic = now + (r->kind == R_CHOICE ? 0.6 : 1.0);
-     a->dirty = 1;
+     mark_focus(a);                     /* the value sits in the focused row */
 }
 
 static void do_rename(struct app *a, const char *name, double now)
@@ -1095,6 +1193,8 @@ static void kb_type(struct app *a, char ch)
 static void key_keyboard(struct app *a, int k, double now)
 {
      int last = KB_ROWS - 1;
+     int shift0 = a->kb_shift;
+     size_t len0 = strlen(a->kb_text);
      switch (k) {
      case DIKS_CURSOR_UP:
           if (a->kb_row > 0) {
@@ -1166,7 +1266,13 @@ static void key_keyboard(struct app *a, int k, double now)
      default:
           return;
      }
-     a->dirty = 1;
+     if (a->screen != S_KEYBOARD || a->kb_shift != shift0) {
+          a->dirty = 1;                 /* Shift relabels every key */
+     } else {
+          mark_focus(a);
+          if (strlen(a->kb_text) != len0)
+               a->want_aux = 1;         /* and the text field */
+     }
 }
 
 static void key_rename(struct app *a, int k, double now)
@@ -1573,7 +1679,8 @@ int main(int argc, char **argv)
           }
           dev_commands(a, now);
           if (shot_flag)
-               a->dirty = 1;
+               mark_focus(a);       /* a partial frame: the shot shows what
+                                     * partial redraws left on screen */
           if (a->dirty)
                redraw(a, now);
      }
