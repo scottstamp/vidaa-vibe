@@ -49,9 +49,14 @@ fi
 # wait for app_man to have the stock engine up: the DirectFB world exists
 # then. No settle delay: vibe-ui takes focus back if the engine's window
 # takes it.
-i=0
-while [ -z "$(pidof hisenseUI)" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done
-echo "hisenseUI=[$(pidof hisenseUI)] at uptime $(up)"
+# Only on the first start of a boot: debloat.sh stops the engine once vibe-ui
+# runs, so a later run of this script (restart-ui.sh) must not wait for it.
+if [ ! -f /tmp/vibe-ui.started ]; then
+    i=0
+    while [ -z "$(pidof hisenseUI)" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done
+    echo "hisenseUI=[$(pidof hisenseUI)] at uptime $(up)"
+    : > /tmp/vibe-ui.started
+fi
 
 n=0
 while [ $n -lt 10 ]; do

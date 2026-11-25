@@ -760,9 +760,23 @@ POWER again. `system.enum.screen.state` went 1 → 0 at about 212 s and back
 to 1 at about 227 s; dmesg shows the panel's STR resume at 224.3 s; the owner
 saw standby and wake work. So standby and wake do not need `app_man` either
 (`vibe-ui` leaves POWER to the system, with `gui.loop.finished` = 1). Script:
-`research/scratch/amstop.sh`, log `/var/local/vibe/amstop.log`. Not yet
-tested: what a kill does to its children (`hisenseUI`, `apmbond`,
-`LauncherService`, `websdk`), and whether anything restarts it.
+`research/scratch/amstop.sh`, log `/var/local/vibe/amstop.log`.
+
+Third test, the kill (`research/scratch/amkill.sh`), uptime 327–347 s: SIGTERM
+to `app_man` ended it alone; its children (`apmbond`, `hisenseUI`, `websdk`,
+`LauncherService`) lived on, reparented. SIGTERM ended `apmbond`, `hisenseUI`
+and `LauncherService` too; the frozen `avsservice` took SIGKILL. Nothing
+came back over the next minutes. `vibe-ui`, `tvmain`, `systemserver` and
+`websdk` kept running. MemAvailable 897 MB (it was 642 MB with everything
+stock running). The owner then checked HOME, settings, input switching,
+volume (the soundbar went 9 → 15 → 9) and standby and wake: all worked.
+
+So `debloat.sh` now stops these four (`STOP_UI`) once `vibe-ui` runs, with
+`app_man` first, and then kills anything still frozen. `boot.sh` waits for
+`hisenseUI` only on its first run of a boot (marker
+`/tmp/vibe-ui.started`), so `restart-ui.sh` does not wait for an engine that
+is gone. Slot B stays as it is: with `debloat.off` the blank engine runs again
+and still draws nothing.
 
 ### Way back (written before the change)
 
@@ -773,6 +787,8 @@ tested: what a kill does to its children (`hisenseUI`, `apmbond`,
 - Firewall only, at once: `iptables -D OUTPUT -j VIBE_OUT`.
 - One service back: take it out of `STOP` (and its uid out of
   `BLOCK_UIDS` if it needs the network), deploy, reboot.
+- The stock UI's pieces (`app_man`, `apmbond`, `hisenseUI`,
+  `LauncherService`) come back with everything else: `debloat.off`, reboot.
 - `rm /var/local/vibe/debloat.sh` removes the feature; `boot.sh` starts it
   only if the file exists.
 

@@ -16,6 +16,9 @@
 #      60 s (in case something starts them again, e.g. after standby).
 #      app_man respawns some at once; those are frozen (SIGSTOP) the second
 #      time they are seen, so they stay alive, unrespawned, using no CPU.
+#   1b. once vibe-ui runs, stops the stock UI's own pieces (STOP_UI:
+#      app_man, apmbond, hisenseUI, LauncherService); after that, anything
+#      frozen is killed, since nothing respawns any more.
 #   2. iptables chain VIBE_OUT, first in OUTPUT:
 #      - refuses DNS queries (udp and tcp 53) for any name under the labels
 #        in BLOCK_LABELS, matched on the DNS wire format (length byte +
@@ -47,6 +50,14 @@ run_aiservice.s vidaa_ai_servic ai_manager
 remoteservice remoteapp_biz_c mosquitto
 dialserver dlna_service mdnsd
 mdharvester masman reggieserver"
+
+# The stock UI's own pieces: the app manager, the engine relauncher, the
+# (blank) engine, the stock home screen's service. Neither keys nor standby
+# and wake need them (tested with app_man frozen, then all four killed).
+# Stopped only once vibe-ui runs, app_man first: it restarts some services.
+# Nothing restarts them. websdk stays: the browser bridge's disarm.
+STOP_UI="app_man apmbond hisenseUI LauncherService"
+UI_DONE=0
 
 BLOCK_LABELS="vidaahub hismarttv hisense hisense-usa hisenseusa vidaa juhaokan"
 # 304 ota_upgrade, 305 app_upgrade, 306 hi_logreport_service, 312
@@ -105,7 +116,12 @@ scan_kill() {
         pid=${p#/proc/}
         name_of $pid
         [ -n "$n" ] || continue
-        [ "$s" = "T" ] && continue          # already frozen
+        if [ "$s" = "T" ]; then             # frozen earlier
+            # with app_man gone nothing respawns: end it properly
+            [ $UI_DONE = 1 ] && case " $1 " in *" $n "*)
+                kill -KILL $pid 2>/dev/null && echo "  frozen $n:$pid killed" ;; esac
+            continue
+        fi
         case " $1 " in
         *" $n "*)
             case "$SEEN" in
@@ -127,6 +143,11 @@ stop_pass() {
     [ -z "$killed" ] && return
     echo "uptime $(up) stopped:$killed"
     for k in $killed; do SEEN="$SEEN${k%%:*} "; done
+    reap
+}
+
+# kill what was TERMed and is still there after 3 s
+reap() {
     sleep 3
     for k in $killed; do
         pid=${k#*:}
@@ -135,11 +156,26 @@ stop_pass() {
     done
 }
 
+ui_pass() {
+    [ $UI_DONE = 1 ] && return
+    [ -n "$(pidof vibe-ui)" ] || return
+    killed=""; frozen=""
+    scan_kill "app_man"
+    sleep 2
+    scan_kill "$STOP_UI"
+    echo "uptime $(up) stock UI stopped:$killed"
+    reap
+    UI_DONE=1
+    ALL="$ALL $STOP_UI"
+    for n in $STOP_UI; do SEEN="$SEEN$n "; done
+}
+
 if off; then echo "debloat.off present, not running"; fw_remove; exit 0; fi
 fw_ensure
 while :; do
     if off; then echo "debloat.off seen at uptime $(up), removing VIBE_OUT, exiting"; fw_remove; exit 0; fi
     stop_pass
+    ui_pass
     fw_ensure
     u=$(up); u=${u%.*}
     if [ "$u" -lt 120 ]; then sleep 5; else sleep 60; fi
