@@ -56,7 +56,7 @@ static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 /* SIGUSR1: write the next frame (our layer only) to /tmp/vibe-shot.raw */
 static void on_usr1(int sig) { (void)sig; shot_flag = 1; }
 
-enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_RENAME_INPUT, S_RENAME_NAME, S_KEYBOARD };
+enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_INPUTS, S_RENAME_NAME, S_KEYBOARD };
 
 static const char *const picture_modes[] = {
      "Dynamic", "Standard", "Cinema Night", "Cinema Day", "Game", "Sport", "Calibrated"
@@ -179,7 +179,11 @@ struct app {
      /* model state */
      struct biz_input in[BIZ_MAX_INPUTS];
      int  nin;
-     int  vis[BIZ_MAX_INPUTS], nvis;      /* indexes of inputs we show */
+     int  all[BIZ_MAX_INPUTS], nall;      /* every input but the tuner */
+     int  vis[BIZ_MAX_INPUTS], nvis;      /* of those, the ones not hidden */
+     char hidden[BIZ_MAX_INPUTS][32];     /* ids the owner hid (Input settings) */
+     int  nhidden;
+     int  vis_fallback;                   /* every input hidden: all shown anyway */
      char cur[32];
      /* "No signal" notice: the current input (not the tuner) has had no
       * signal since nosig_since; shown after 3 s with no menu open */
@@ -396,7 +400,7 @@ static void hints(struct app *a, cv_t *c, int cx, int y, const char *const *pair
 #define CARD_GAP 36
 #define CARD_R   28
 
-#define N_SETTINGS (N_PAGES + 1)          /* the pages, then Rename inputs */
+#define N_SETTINGS (N_PAGES + 1)          /* the pages, then Input settings */
 #define SET_CARD_W 300
 #define SET_CARD_GAP 28
 
@@ -465,8 +469,8 @@ static void draw_home(struct app *a, cv_t *c)
      for (int k = 0; k < N_SETTINGS; k++)
           home_card_w(a, c, HOME_X + k * (SET_CARD_W + SET_CARD_GAP), 646, SET_CARD_W,
                       a->row == 1 && a->col == k,
-                      k < N_PAGES ? pages[k].title : "Rename inputs",
-                      k < N_PAGES ? pages[k].sub : "Device names", -1, 0);
+                      k < N_PAGES ? pages[k].title : "Input settings",
+                      k < N_PAGES ? pages[k].sub : "Rename, hide", -1, 0);
 
      static const char *const h[] = { "ARROWS", "Navigate", "OK", "Select", "BACK", "Close" };
      hints(a, c, a->W / 2, a->H - 96, h, 3);
@@ -600,8 +604,11 @@ static void draw_settings(struct app *a, cv_t *c)
 
 #define LIST_ROW_H 92
 
+static const char *const hints_select[] = { "OK", "Select", "BACK", "Back" };
+
 static void draw_list(struct app *a, cv_t *c, const char *title, int n,
-                      const char *(*label)(struct app *, int), const char *(*sub)(struct app *, int))
+                      const char *(*label)(struct app *, int), const char *(*sub)(struct app *, int),
+                      const char *const *hh, int nh)
 {
      int x0 = r_x(a), y0 = 40, h = a->H - 80, rx = x0 + 28, rw = R_W - 56, top = y0 + 150;
 
@@ -627,12 +634,23 @@ static void draw_list(struct app *a, cv_t *c, const char *title, int n,
                     text_v(a, a->f_small, rx + rw - 36, y, LIST_ROW_H, sel ? 0xe6ffffff : K_TEXT3, s2, 1);
           }
      }
-     static const char *const hh[] = { "OK", "Select", "BACK", "Back" };
-     hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, 2);
+     hints(a, c, x0 + R_W / 2, y0 + h - 76, hh, nh);
 }
 
-static const char *rename_input_label(struct app *a, int i) { return input_label(a, a->vis[i]); }
-static const char *rename_input_sub(struct app *a, int i)   { return a->in[a->vis[i]].id; }
+static int is_hidden(struct app *a, const char *id);
+
+/* Input settings: every input but the tuner, hidden ones too */
+static const char *inputs_label(struct app *a, int i) { return input_label(a, a->all[i]); }
+static const char *inputs_sub(struct app *a, int i)
+{
+     static char buf[64];
+     const char *id = a->in[a->all[i]].id;
+     /* as Home sees it: with every input hidden, all are shown (fallback) */
+     snprintf(buf, sizeof(buf), "%s \xc2\xb7 %s", id,
+              is_hidden(a, id) && !a->vis_fallback ? "Hidden" : "Shown");
+     return buf;
+}
+static const char *const hints_inputs[] = { "OK", "Rename", "LEFT/RIGHT", "Show/hide", "BACK", "Back" };
 
 /* the current name is a custom one: neither the id nor a preset */
 static int custom_name(struct app *a)
@@ -805,11 +823,11 @@ static void draw_screens(struct app *a, cv_t *c, double now)
      case S_HOME:         draw_home(a, c); break;
      case S_QUICK:        draw_quick(a, c); break;
      case S_SETTINGS:     draw_settings(a, c); break;
-     case S_RENAME_INPUT: draw_list(a, c, "Rename inputs", a->nvis, rename_input_label, rename_input_sub); break;
+     case S_INPUTS: draw_list(a, c, "Input settings", a->nall, inputs_label, inputs_sub, hints_inputs, 3); break;
      case S_RENAME_NAME: {
           char t[96];
           snprintf(t, sizeof(t), "Rename %s", input_label(a, a->rename_idx));
-          draw_list(a, c, t, N_PRESETS, preset_label, preset_sub);
+          draw_list(a, c, t, N_PRESETS, preset_label, preset_sub, hints_select, 2);
           break;
      }
      case S_KEYBOARD:     draw_keyboard(a, c); break;
@@ -945,6 +963,75 @@ static void mark_hud(struct app *a)
           a->dirty = 2;
 }
 
+/* ---- hidden inputs: kept in vibe-ui's state directory, one id per line */
+#define STATE_HIDDEN "/var/local/vibe/state/hidden-inputs"
+
+static int is_hidden(struct app *a, const char *id)
+{
+     for (int i = 0; i < a->nhidden; i++)
+          if (!strcmp(a->hidden[i], id))
+               return 1;
+     return 0;
+}
+
+/* The inputs Home and the INPUT list show: every input but the tuner and
+ * the hidden ones; a hidden input that is current stays in (marked NOW), so
+ * HOME then OK never switches away from it (a soundbar's CEC can switch the
+ * TV to its own, hidden, input); if every input is hidden, all are shown. */
+static void rebuild_vis(struct app *a)
+{
+     a->nvis = 0;
+     a->vis_fallback = 0;
+     for (int k = 0; k < a->nall; k++) {
+          const char *id = a->in[a->all[k]].id;
+          if (!is_hidden(a, id) || !strcmp(id, a->cur))
+               a->vis[a->nvis++] = a->all[k];
+     }
+     if (a->nvis == 0) {
+          a->vis_fallback = 1;
+          for (int k = 0; k < a->nall; k++)
+               a->vis[a->nvis++] = a->all[k];
+     }
+}
+
+static void load_hidden(struct app *a)
+{
+     char line[64];
+     FILE *f = fopen(STATE_HIDDEN, "r");
+     a->nhidden = 0;
+     if (!f)
+          return;
+     while (a->nhidden < BIZ_MAX_INPUTS && fgets(line, sizeof(line), f)) {
+          line[strcspn(line, "\r\n")] = 0;
+          if (line[0] && strlen(line) < sizeof(a->hidden[0]) && !is_hidden(a, line))
+               snprintf(a->hidden[a->nhidden++], sizeof(a->hidden[0]), "%s", line);
+     }
+     fclose(f);
+     printf("hidden inputs: %d\n", a->nhidden);
+}
+
+/* write the list (only ids of inputs that exist), fsync'ed; 0 on success */
+static int save_hidden(struct app *a)
+{
+     FILE *f = fopen(STATE_HIDDEN ".new", "w");
+     if (!f) {
+          perror("vibe-ui: " STATE_HIDDEN ".new");
+          return -1;
+     }
+     for (int i = 0; i < a->nhidden; i++)
+          for (int k = 0; k < a->nall; k++)
+               if (!strcmp(a->in[a->all[k]].id, a->hidden[i])) {
+                    fprintf(f, "%s\n", a->hidden[i]);
+                    break;
+               }
+     int ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+     if (fclose(f) != 0 || !ok || rename(STATE_HIDDEN ".new", STATE_HIDDEN) != 0) {
+          perror("vibe-ui: saving " STATE_HIDDEN);
+          return -1;
+     }
+     return 0;
+}
+
 static void poll_inputs(struct app *a)
 {
      struct biz_input in[BIZ_MAX_INPUTS];
@@ -959,10 +1046,11 @@ static void poll_inputs(struct app *a)
      if (n > 0 && (n != a->nin || memcmp(in, a->in, n * sizeof(in[0])))) {
           memcpy(a->in, in, n * sizeof(in[0]));
           a->nin = n;
-          a->nvis = 0;
+          a->nall = 0;
           for (int i = 0; i < n; i++)
                if (strcmp(in[i].id, "TV"))      /* the tuner is not used */
-                    a->vis[a->nvis++] = i;
+                    a->all[a->nall++] = i;
+          rebuild_vis(a);
           /* never clear a redraw already asked for (a volume key earlier
            * in the same loop) */
           if (a->screen != S_NONE)
@@ -971,6 +1059,7 @@ static void poll_inputs(struct app *a)
      if (cur[0] && strcmp(cur, a->cur)) {
           printf("current input: %s\n", cur);
           snprintf(a->cur, sizeof(a->cur), "%s", cur);
+          rebuild_vis(a);                  /* a hidden input shows while current */
           if (a->screen != S_NONE)
                a->dirty = 1;
      }
@@ -1119,6 +1208,7 @@ static void poll_page(struct app *a)
 
 static void open_screen(struct app *a, enum screen s, double now)
 {
+     enum screen from = a->screen;
      a->screen = s;
      a->top = 0;
      a->dirty = 1;
@@ -1138,8 +1228,13 @@ static void open_screen(struct app *a, enum screen s, double now)
           a->nrows_vis = 0;
           poll_page(a);
           a->next_pic = now + 1.0;
-     } else if (s == S_RENAME_INPUT) {
+     } else if (s == S_INPUTS) {
+          /* back from renaming: stay on that input; from Home: the top */
           a->sel = 0;
+          if (from == S_RENAME_NAME || from == S_KEYBOARD)
+               for (int k = 0; k < a->nall; k++)
+                    if (a->all[k] == a->rename_idx)
+                         a->sel = k;
      } else if (s == S_RENAME_NAME) {
           a->sel = 0;
      } else if (s == S_KEYBOARD) {
@@ -1286,13 +1381,13 @@ static void key_home(struct app *a, int k, double now)
      case DIKS_CURSOR_LEFT:  if (a->col > 0) { a->col--; mark_focus(a); } break;
      case DIKS_CURSOR_RIGHT: if (a->col + 1 < ncol) { a->col++; mark_focus(a); } break;
      case DIKS_CURSOR_UP:
-          if (a->row > 0) { a->row = 0; if (a->col >= a->nvis) a->col = a->nvis - 1; mark_focus(a); }
+          if (a->row > 0) { a->row = 0; if (a->col >= a->nvis) a->col = a->nvis > 0 ? a->nvis - 1 : 0; mark_focus(a); }
           break;
      case DIKS_CURSOR_DOWN:
           if (a->row < 1) { a->row = 1; if (a->col >= N_SETTINGS) a->col = N_SETTINGS - 1; mark_focus(a); }
           break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
-          if (a->row == 0 && a->col < a->nvis) {
+          if (a->row == 0 && a->col >= 0 && a->col < a->nvis) {
                switch_to(a, a->vis[a->col], now);
                a->screen = S_NONE;
                a->dirty = 1;
@@ -1302,7 +1397,7 @@ static void key_home(struct app *a, int k, double now)
                     a->val_known = 0;
                     open_screen(a, S_SETTINGS, now);
                } else {
-                    open_screen(a, S_RENAME_INPUT, now);
+                    open_screen(a, S_INPUTS, now);
                }
           }
           break;
@@ -1426,7 +1521,7 @@ static void do_rename(struct app *a, const char *name, double now)
      snprintf(msg, sizeof(msg), "%s: %s", id, name);
      toast(a, msg, now);
      a->next_inputs = now + 0.5;
-     open_screen(a, S_RENAME_INPUT, now);
+     open_screen(a, S_INPUTS, now);
 }
 
 static void kb_type(struct app *a, char ch)
@@ -1525,16 +1620,53 @@ static void key_keyboard(struct app *a, int k, double now)
      }
 }
 
-static void key_rename(struct app *a, int k, double now)
+/* show or hide one input; at least one stays shown */
+static void toggle_hidden(struct app *a, int idx, double now)
 {
-     int n = a->screen == S_RENAME_INPUT ? a->nvis : N_PRESETS;
+     const char *id = a->in[idx].id;
+     if (is_hidden(a, id)) {
+          int j = 0;
+          for (int i = 0; i < a->nhidden; i++)
+               if (strcmp(a->hidden[i], id))
+                    memcpy(a->hidden[j++], a->hidden[i], sizeof(a->hidden[0]));
+          a->nhidden = j;
+     } else {
+          int shown = 0;
+          for (int k = 0; k < a->nall; k++)
+               shown += !is_hidden(a, a->in[a->all[k]].id);
+          if (shown <= 1) {
+               toast(a, "Keep at least one input", now);
+               return;
+          }
+          if (a->nhidden >= BIZ_MAX_INPUTS) {
+               toast(a, "Too many hidden inputs", now);
+               return;
+          }
+          snprintf(a->hidden[a->nhidden++], sizeof(a->hidden[0]), "%s", id);
+     }
+     if (save_hidden(a) != 0)
+          toast(a, "Could not save: back after a restart", now);
+     rebuild_vis(a);
+     printf("input %s %s\n", id, is_hidden(a, id) ? "hidden" : "shown");
+     mark_focus(a);                     /* the change sits in the focused row */
+}
+
+static void key_rename(struct app *a, int k, int repeat, double now)
+{
+     int n = a->screen == S_INPUTS ? a->nall : N_PRESETS;
      switch (k) {
      case DIKS_CURSOR_UP:   list_move(a, n, -1); break;
      case DIKS_CURSOR_DOWN: list_move(a, n, +1); break;
+     case DIKS_CURSOR_LEFT:
+     case DIKS_CURSOR_RIGHT:
+          /* one toggle per press: a held key's repeats would flip it back */
+          if (!repeat && a->screen == S_INPUTS && a->sel < a->nall)
+               toggle_hidden(a, a->all[a->sel], now);
+          break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
-          if (a->screen == S_RENAME_INPUT) {
-               if (a->sel < a->nvis) {
-                    a->rename_idx = a->vis[a->sel];
+          if (a->screen == S_INPUTS) {
+               if (a->sel < a->nall) {
+                    a->rename_idx = a->all[a->sel];
                     open_screen(a, S_RENAME_NAME, now);
                }
           } else if (name_presets[a->sel] == KB_ENTRY) {
@@ -1545,7 +1677,7 @@ static void key_rename(struct app *a, int k, double now)
           }
           break;
      case DIKS_BACK:
-          if (a->screen == S_RENAME_NAME) open_screen(a, S_RENAME_INPUT, now);
+          if (a->screen == S_RENAME_NAME) open_screen(a, S_INPUTS, now);
           else { open_screen(a, S_HOME, now); a->row = 1; a->col = N_PAGES; }
           break;
      case DIKS_EXIT:
@@ -1644,8 +1776,8 @@ static void on_key(struct app *a, int k, int repeat, double now)
      case S_HOME:         key_home(a, k, now); break;
      case S_QUICK:        key_quick(a, k, now); break;
      case S_SETTINGS:     key_settings(a, k, repeat, now); break;
-     case S_RENAME_INPUT:
-     case S_RENAME_NAME:  key_rename(a, k, now); break;
+     case S_INPUTS:
+     case S_RENAME_NAME:  key_rename(a, k, repeat, now); break;
      case S_KEYBOARD:     key_keyboard(a, k, now); break;
      case S_NONE:         break;
      }
@@ -1831,6 +1963,7 @@ int main(int argc, char **argv)
           r = biz_set_int(BIZ_KEY_GUI_LOOP_FINISHED, 1);
           printf("gui.loop.finished was %d, set 1 -> r=%d\n", v, r);
      }
+     load_hidden(a);                    /* before the first input list */
      poll_inputs(a);
      a->bar_expected = read_bar_expected();
      printf("soundbar expected: %d (remembered)\n", a->bar_expected);

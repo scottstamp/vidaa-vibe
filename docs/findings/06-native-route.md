@@ -634,6 +634,22 @@ off", `switch.off.tv [4] -> r=1`, screen off, POWER woke it; run 2, a key
 in the last minute cancelled it and the key read 0 (owner saw the
 countdown). (`arg[0]=4` in the log is printed by `libbizAgent.so` itself.)
 
+## Input settings: hiding inputs
+
+Home's last settings card is "Input settings" (was "Rename inputs"). It
+lists every input but the tuner, each with its id and "Shown"/"Hidden";
+LEFT/RIGHT shows or hides it (one toggle per press: repeats are ignored),
+OK opens the rename presets and the keyboard as before. Hidden inputs drop
+out of Home and the INPUT list. Kept in `/var/local/vibe/state/hidden-inputs`
+(one id per line, owned by UhisUI, written to `.new`, fsync'ed, renamed;
+duplicates dropped on load, ids of inputs that no longer exist dropped on
+save). At least one input stays shown; if every input is hidden anyway (an
+edited file), all are shown and listed as "Shown". A hidden input that is
+current (e.g. the soundbar's HDMI1 after a CEC switch) still appears, marked
+NOW, while it is current, so HOME then OK never switches away from it.
+Reviewed (two lenses, skeptic per finding) before commit; the repeat bug and
+five low findings were fixed. The owner hid AV and HDMI1 (the soundbar).
+
 ## Custom input names
 
 Rename → input → "Custom name…" opens an on-screen keyboard (digits, a–z
