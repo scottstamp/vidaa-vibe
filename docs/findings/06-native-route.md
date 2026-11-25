@@ -725,6 +725,15 @@ instead. Standby and wake, twice, with the frozen processes: worked, and
 nothing came back (owner, 2026-11-25). Owner also checked keys, inputs,
 volume and settings.
 
+Second boot, with the marker: `boot.sh` 7.84 s, `debloat.sh` 7.87 s,
+`hisenseUI` seen 8.09 s, `vibe-ui` started 8.10 s (was 13.6 s, and about
+12.5 s with the old 5 s sleep). Its model read took 2.8 s at that point of
+the boot (0.6 s on an idle TV), so keys work from about 11 s. The SIGKILL
+follow-up now catches `ota_upgrade`, `mosquitto` and Netflix. `VIBE_OUT` was
+hooked at 9.2 s and again at 15.3 s: something in the stock boot flushed
+`OUTPUT` in between (not identified), and the next pass put it back. So the
+block has a gap of up to one pass (5 s) early in boot.
+
 Hostnames came from the binaries and caches (`grep -a` over `/usr/local`,
 `/basic`, `/opt`, `/3rd`, `/var/local`): `api.hismarttv.com` and
 `domain.vidaahub.com` in `app_upgrade`, `geo-bas` and
