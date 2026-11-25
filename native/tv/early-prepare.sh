@@ -13,10 +13,21 @@ SRC=/basic/am_config
 OUT=$V/am_config.trim
 # app_man's own boot starts we do not want (each is also stopped by
 # debloat.sh if it runs anyway). Keep apm_bond, hisenseUI, LauncherService.
+# (websdk stays: the browser bridge, the hook's disarm of last resort on a
+# stock boot; debloat.sh stops it later on vibe boots. TTSPlayer and
+# dialserver seem to be started by app_man regardless, and resmon and
+# HiAvsService have no binary on this unit: listed anyway, harmless.)
 SECTIONS="AirPlayBridge ota_upgrade hi_logreport_service resmon app_upgrade
-HiAvsService mosquitto dialserver ai_manager vidaa_ai_service websdk
+HiAvsService mosquitto dialserver ai_manager vidaa_ai_service
 TTSPlayer netflix masman mdharvester reggieserver"
-EXPECT=16       # one power_on_start = true line in each of them
+EXPECT=15       # one power_on_start = true line in each of them
+
+# a new copy has not been tested: a permanent switch must not pick it up
+# unsupervised; test with early.arm first, then re-arm early.on
+if [ -f $V/early.on ]; then
+    mv -f $V/early.on $V/early.on.untested
+    echo "early.on moved to early.on.untested: test the new copy with early.arm first"
+fi
 
 md5of() { set -- $($BB md5sum "$1" 2>/dev/null); echo "${1:-}"; }
 

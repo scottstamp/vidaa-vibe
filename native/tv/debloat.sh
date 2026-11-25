@@ -213,10 +213,13 @@ ui_pass() {
     # early.sh's overlay worked if app_man got as far as starting the engine:
     # confirm it, so the next boot overlays again (an unconfirmed boot makes
     # the next one skip the overlay)
-    if [ -n "$engine" ] && [ -f $V/early.pending ]; then
+    # (only while the overlay is mounted: a marker from an earlier boot is
+    # early.sh's to judge, at the next boot)
+    if [ -n "$engine" ] && [ -f $V/early.pending ] && grep -q " /basic/am_config " /proc/mounts; then
         rm -f $V/early.pending
-        sync
+        $BB fsync $V
         echo "uptime $(up) early overlay confirmed (hisenseUI $engine started)"
+        echo "$(date) uptime $(up): confirmed (hisenseUI started)" >> $V/early.history
     fi
     killed=""; frozen=""
     scan_kill "app_man"

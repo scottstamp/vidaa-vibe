@@ -40,6 +40,30 @@ make_new() {
 # before it detaches), right after it logs its start time, start early.sh in
 # the background. Both lines carry the marker, so taking them out is a filter.
 EARLY_ANCHOR='  cat /proc/uptime >> "$L"'
+md5of() { set -- $($BB md5sum "$1" 2>/dev/null); echo "${1:-}"; }
+
+# a hook we are about to install must still start dropbear: `sh -n` alone
+# passes an empty or cut-off file
+hook_sane() {
+    /bin/sh -n "$1" || { echo "syntax check FAILED: $1"; return 1; }
+    grep -q -x 'start_db' "$1" || { echo "no start_db call in $1"; return 1; }
+    return 0
+}
+
+# write $1 over the hook in place (keeps the UhisWebsdk owner), verify, and
+# put $2 (the copy from before) back on any mismatch
+install_hook() {
+    cat "$1" > $H
+    sync
+    if [ "$(md5of $H)" != "$(md5of "$1")" ]; then
+        cat "$2" > $H
+        sync
+        echo "WRITE MISMATCH: hook restored from $2 ($(md5of $H))"
+        return 1
+    fi
+    return 0
+}
+
 early_new() {
     if grep -q "vidaa-vibe-early" $H; then echo "early lines already in"; return 1; fi
     n=$(grep -c -x -F "$EARLY_ANCHOR" $H)
@@ -49,9 +73,14 @@ early_new() {
       $0 == anchor {
         print "  # vidaa-vibe-early: overlay the trimmed app_man config before app_man reads it"
         print "  [ -f /var/local/vibe/early.sh ] && $BB setsid /bin/sh /var/local/vibe/early.sh </dev/null >/dev/null 2>&1 &  # vidaa-vibe-early"
-      }' $H > $W/otaTest.early.new
-    /bin/sh -n $W/otaTest.early.new || { echo "syntax check FAILED"; return 1; }
-    echo "--- diff (line counts: $($BB wc -l < $H) vs $($BB wc -l < $W/otaTest.early.new))"
+      }' $H > $W/otaTest.early.new || { echo "awk failed"; return 1; }
+    old=$($BB wc -l < $H); new=$($BB wc -l < $W/otaTest.early.new)
+    [ "$new" -eq $((old + 2)) ] || { echo "line count $old -> $new (want +2)"; return 1; }
+    # the new hook minus our two lines must be exactly the old hook
+    grep -v "vidaa-vibe-early" $W/otaTest.early.new > $W/otaTest.roundtrip
+    [ "$(md5of $W/otaTest.roundtrip)" = "$(md5of $H)" ] || { echo "new hook is not old + 2 lines"; return 1; }
+    hook_sane $W/otaTest.early.new || return 1
+    echo "--- diff (line counts: $old vs $new)"
     $BB diff $H $W/otaTest.early.new
     return 0
 }
@@ -65,17 +94,23 @@ early-apply)
     early_new || exit 1
     cat $H > $W/otaTest.before-early    # our copy of the hook as it is now
     sync
-    cat $W/otaTest.early.new > $H         # in place: keeps the UhisWebsdk owner
-    sync
+    [ "$(md5of $W/otaTest.before-early)" = "$(md5of $H)" ] || { echo "backup mismatch; nothing written"; exit 1; }
+    install_hook $W/otaTest.early.new $W/otaTest.before-early || exit 1
     ls -la $H; md5sum $H $W/otaTest.before-early $W/otaTest.early.new
-    /bin/sh -n $H && echo "installed hook syntax OK"
+    hook_sane $H && echo "installed hook: syntax OK, start_db present"
     ;;
 early-revert)
     grep -q "vidaa-vibe-early" $H || { echo "no early lines in the hook"; exit 0; }
-    grep -v "vidaa-vibe-early" $H > $W/otaTest.noearly.new
-    /bin/sh -n $W/otaTest.noearly.new || { echo "syntax check FAILED; nothing written"; exit 1; }
-    cat $W/otaTest.noearly.new > $H
+    cat $H > $W/otaTest.with-early
     sync
+    grep -v "vidaa-vibe-early" $H > $W/otaTest.noearly.new || { echo "grep failed; nothing written"; exit 1; }
+    old=$($BB wc -l < $H); new=$($BB wc -l < $W/otaTest.noearly.new)
+    [ "$new" -eq $((old - 2)) ] || { echo "line count $old -> $new (want -2); nothing written"; exit 1; }
+    hook_sane $W/otaTest.noearly.new || { echo "nothing written"; exit 1; }
+    if [ -f $W/otaTest.before-early ] && [ "$(md5of $W/otaTest.noearly.new)" != "$(md5of $W/otaTest.before-early)" ]; then
+        echo "note: result differs from otaTest.before-early (the hook changed since); writing the filtered hook"
+    fi
+    install_hook $W/otaTest.noearly.new $W/otaTest.with-early || exit 1
     ls -la $H; md5sum $H
     ;;
 check)

@@ -800,35 +800,60 @@ so a mount after the read changes nothing until the next boot.
 ### Lever 1 in practice: `early.sh` (way back written before the change)
 
 Files: `native/tv/early-prepare.sh` builds `/var/local/vibe/am_config.trim`
-on the TV from `/basic/am_config` (16 `power_on_start = true` lines set to
+on the TV from `/basic/am_config` (15 `power_on_start = true` lines set to
 false: AirPlayBridge, ota_upgrade, hi_logreport_service, resmon,
 app_upgrade, HiAvsService, mosquitto, dialserver, ai_manager,
-vidaa_ai_service, websdk, TTSPlayer, netflix, masman, mdharvester,
-reggieserver; nothing else changes) and records both md5s in
-`am_config.md5`. `native/tv/early.sh`, started in the background by two
-lines in the hook's first stage (marked `vidaa-vibe-early`, ~5.3 s),
-bind-mounts the copy over `/basic/am_config` before `app_man` parses it
-(~6.5 s). It acts only when armed: `/var/local/vibe/early.arm` (one boot,
-deleted after mounting) or `/var/local/vibe/early.on` (every boot); never
-with any off switch (`vibe/off`, `vibe-off`, `vibe-stock`,
-`vibe/debloat.off`); never if either md5 differs (e.g. after a firmware
-update). It writes `early.pending` after mounting; `debloat.sh` removes it
-once `vibe-ui` runs and `hisenseUI` has appeared (proof that `app_man`
-parsed the copy). If a boot never gets there, the next boot finds
-`early.pending`, skips the overlay and deletes the marker: a bad overlay
-costs one boot and heals itself without SSH. Nothing is written to a
-verified partition; the bind mount ends at reboot.
+vidaa_ai_service, TTSPlayer, netflix, masman, mdharvester, reggieserver;
+nothing else changes; checked byte for byte against an independent build)
+and records both md5s in `am_config.md5`. `websdk` stays on (the bridge,
+the hook's disarm of last resort on a stock boot; `debloat.sh` stops it
+later on vibe boots). Per the review, TTSPlayer and dialserver seem to be
+started by `app_man` regardless, and resmon and HiAvsService have no binary
+here: about 11 of the 15 lines matter. Re-running `early-prepare.sh` moves
+`early.on` to `early.on.untested`, so a new copy is first tested with
+`early.arm`.
+
+`native/tv/early.sh` is started in the background by two lines in the
+hook's first stage (marked `vidaa-vibe-early`, ~5.3 s). It bind-mounts the
+copy over `/basic/am_config` before `app_man` parses it (~6.5 s). It acts
+only when armed: `/var/local/vibe/early.arm` (one boot; deleted before
+mounting) or `/var/local/vibe/early.on` (every boot); never with an off
+switch (`vibe/off`, `vibe-off`, `vibe-stock`, `vibe/debloat.off`), never
+without `boot.sh`, `debloat.sh` and `vibe-ui` (nothing could confirm),
+never if either md5 differs (e.g. after a firmware update).
+
+Crash guard: before mounting it writes `early.pending` and fsyncs it (and
+its directory; ~10 ms, measured), because `app_man` reboots without a sync
+if `apm_bond` stops. `debloat.sh` deletes the marker once `vibe-ui` runs
+and `hisenseUI` has appeared while the overlay is mounted. Any boot that
+finds the marker treats the last overlaid boot as failed: it renames
+`early.on` to `early.on.failed`, deletes `early.arm`, records it in
+`early.history` and mounts nothing. So a bad overlay costs one boot with
+either switch, heals without SSH, and stays off until re-armed by hand.
+Nothing is written to a verified partition; the bind mount ends at reboot.
+
+Checked without a reboot (2026-11-25, `app_man` not running):
+`/bin/mount --bind` of the copy over `/basic/am_config` worked (rc 0;
+`/proc/mounts`: `/dev/mmcblk0p39 /basic/am_config ext4 rw,...`; the file
+read as the copy), `/bin/umount` restored the original md5. The change was
+reviewed adversarially before going into the hook (four lenses, skeptic
+per finding); fixes: the marker before the mount, disarm on failure, the
+marker checked before anything else, confirm only while mounted, and
+`hook-patch.sh` early steps that check the old hook + 2 lines round trip,
+the `start_db` call, and verify the write (restoring on mismatch).
 
 Way back:
 - Stop using it: `rm /var/local/vibe/early.on /var/local/vibe/early.arm`
-  (takes effect at the next boot; the mount of the current boot stays
-  until then, harmless: `app_man` read the file once).
+  (next boot; the current boot's mount is harmless, `app_man` read the
+  file once).
 - Take the hook lines out: `HOOK_STEP=early-revert sh
-  /var/local/vibe/hook-patch.sh` (in place, keeps the UhisWebsdk owner;
-  `otaTest.prev.bak` is not involved). Our copy of the hook before the
-  change: `/var/local/vibe/hook/otaTest.before-early`.
+  /var/local/vibe/hook-patch.sh` (in place, keeps the UhisWebsdk owner,
+  checks the result and restores on mismatch; `otaTest.prev.bak` is not
+  involved). Our copy of the hook before the change:
+  `/var/local/vibe/hook/otaTest.before-early`.
 - Remove everything: also `rm /var/local/vibe/early.sh
-  /var/local/vibe/am_config.trim /var/local/vibe/am_config.md5`.
+  /var/local/vibe/am_config.trim /var/local/vibe/am_config.md5
+  /var/local/vibe/early.on.failed /var/local/vibe/early.on.untested`.
 
 ## To revisit: unused remote buttons
 
