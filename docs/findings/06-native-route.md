@@ -608,7 +608,29 @@ curtain) fades the volume to 0 over the curtain's duration and then calls
 for "power off": `appC.sendAppMessage("TvsApm",
 '{"action":"poweroff",...}')`, a message to the app manager in
 `systemserver`. Not mapped yet: how `appC.sendAppMessage` reaches it, and
-what the suppress flag suppresses (the stock UI presumably clears it).
+what the suppress flag suppresses (the stock UI presumably clears it; with
+it left at 1, the remote, POWER and volume kept working, owner).
+
+`switch.off.tv` again, now with `gui.loop.finished` = 1 (2026-11-25):
+`vibe-model --yes action kilby.action.system.switch.off.tv 4` at uptime
+1509.7 s; `enum.screen.state` 1 → 0 by 1511 s; the owner pressed POWER and
+the TV woke (screen 1 at 1523 s, panel "STR resume Done" at 1519.7 s),
+`vibe-ui` still running. So the earlier strand was the missing
+`gui.loop.finished`, not the action.
+
+vibe-ui now does what the stock UI did, with its own deadline (tvmain's
+`switch.off.notify` stays 2 and the suppress flag stays 1 after use, so
+they cannot mark the next expiry): setting the timer in Sleep timer arms
+`now + minutes`; a timer found set at start counts from start. In the last
+minute a toast counts down ("Turning off in N s · any key cancels"); any key
+but POWER cancels (timer key set to 0, "Sleep timer off"); at 0 it sends
+`switch.off.tv` with reason 4 (the stock sleep-timer reason) and sets the
+timer key to 0. Standby (`enum.screen.state` 0) before then cancels it, so
+the action is never sent to a TV already off. Tested with the timer key set
+to 2 and `vibe-ui` restarted: run 1 unattended, "last minute", "switching
+off", `switch.off.tv [4] -> r=1`, screen off, POWER woke it; run 2, a key
+in the last minute cancelled it and the key read 0 (owner saw the
+countdown). (`arg[0]=4` in the log is printed by `libbizAgent.so` itself.)
 
 ## Custom input names
 

@@ -66,9 +66,10 @@ Ways back (all over SSH, each documented in 06-native-route.md):
 - **The stock UI bundle in `/APPS/channelA/hisenseUI` is the fallback.** Do
   not edit it in place until there is a verified copy elsewhere and a tested
   way to restore it.
-- **Never send `kilby.action.system.switch.off.tv`.** It left the TV in a
-  standby nothing woke from. POWER is left to the system
-  (`system.gui.loop.finished` = 1).
+- **`kilby.action.system.switch.off.tv` only with
+  `system.gui.loop.finished` = 1** (vibe-ui sets it at start). Without it,
+  the action left the TV in a standby nothing woke from. vibe-ui sends it
+  only at sleep-timer end; POWER is left to the system.
 - **Never guess model action names.** The `system.*` family includes
   factory reset and clearing user data.
 - **Volume never above 15.** The owner sits next to the soundbar.

@@ -157,3 +157,11 @@ int biz_rename_input(const char *id, const char *name)
      const char *a[2] = { id, name };
      return biz_action(BIZ_ACTION_RENAME, 2, a);
 }
+
+int biz_switch_off_tv(int reason)
+{
+     char r[16];
+     snprintf(r, sizeof(r), "%d", reason);
+     const char *a[1] = { r };
+     return biz_action(BIZ_ACTION_POWER_OFF, 1, a);
+}

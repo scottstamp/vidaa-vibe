@@ -188,6 +188,13 @@ struct app {
      int  bar_expected;            /* remembered: a soundbar is normally there */
      int  bar_gone_polls;          /* consecutive polls with no ARC device */
      double arc_since;             /* when the output last became the soundbar */
+     /* Sleep timer. tvmain counts down too, but at the end it only tells
+      * the UI (one minute early) and leaves the switch-off to it; its flags
+      * stay set afterwards, so they cannot mark the next expiry. We keep our
+      * own deadline from when the timer was set (docs/findings/06). */
+     double sleep_deadline;        /* 0: no timer */
+     int  sleep_warned;            /* the last-minute countdown is showing */
+     double next_sleep_tick;
      int  page;                             /* settings page shown */
      int  val[MAX_ROWS], val_known;         /* its row values */
      int  vis_row[MAX_ROWS], nrows_vis;     /* rows this TV supports */
@@ -1043,6 +1050,67 @@ static void toast(struct app *a, const char *msg, double now)
      a->dirty = 1;
 }
 
+/* ---- sleep timer */
+static void sleep_arm(struct app *a, int minutes, double now)
+{
+     a->sleep_warned = 0;
+     if (minutes > 0) {
+          a->sleep_deadline = now + minutes * 60.0;
+          printf("sleep timer: off at %.0f (in %d min)\n", a->sleep_deadline, minutes);
+     } else {
+          if (a->sleep_deadline)
+               printf("sleep timer: disarmed\n");
+          a->sleep_deadline = 0;
+     }
+}
+
+/* cancelled by a key in the last minute, or by standby: Off in the model too */
+static void sleep_cancel(struct app *a, const char *why, double now, int say)
+{
+     printf("sleep timer: cancelled (%s)\n", why);
+     sleep_arm(a, 0, now);
+     biz_set_int(BIZ_KEY_SLEEP_TIMER, 0);
+     a->val_known = 0;                  /* the Sleep page shows the new value */
+     if (say)
+          toast(a, "Sleep timer off", now);
+     else
+          a->toast_until = 0;
+     a->dirty = 1;
+}
+
+static void sleep_tick(struct app *a, double now)
+{
+     if (!a->sleep_deadline)
+          return;
+     double left = a->sleep_deadline - now;
+     if (left <= 0) {
+          printf("sleep timer: switching off\n");
+          a->sleep_deadline = 0;
+          a->sleep_warned = 0;
+          a->screen = S_NONE;
+          a->toast_until = 0;
+          a->dirty = 1;
+          int r = biz_switch_off_tv(BIZ_POWER_OFF_SLEEP_TIMER);
+          printf("switch.off.tv [%d] -> r=%d\n", BIZ_POWER_OFF_SLEEP_TIMER, r);
+          biz_set_int(BIZ_KEY_SLEEP_TIMER, 0);
+          return;
+     }
+     if (left > 60)
+          return;
+     if (!a->sleep_warned) {
+          a->sleep_warned = 1;
+          a->next_sleep_tick = 0;
+          printf("sleep timer: last minute\n");
+     }
+     if (now >= a->next_sleep_tick) {
+          snprintf(a->toast, sizeof(a->toast), "Turning off in %d s \xc2\xb7 any key cancels",
+                   (int)(left + 0.999));
+          a->toast_until = now + 1.5;
+          a->next_sleep_tick = now + 1.0;
+          a->dirty = 1;
+     }
+}
+
 static void switch_to(struct app *a, int idx, double now)
 {
      struct biz_input *in = &a->in[idx];
@@ -1159,6 +1227,8 @@ static void key_settings(struct app *a, int k, int repeat, double now)
           v = v < 0 ? 0 : v > 100 ? 100 : v;
      }
      rc = r->set ? r->set(v) : biz_set_int(r->key, v);
+     if (!strcmp(r->key, BIZ_KEY_SLEEP_TIMER))
+          sleep_arm(a, v, now);
      printf("%s: %s = %d -> r=%d\n", p->title, r->name, v, rc);
      a->val[ri] = v;
      /* a change can move other rows (picture mode moves the sliders); the
@@ -1306,6 +1376,12 @@ static void key_rename(struct app *a, int k, double now)
 
 static void on_key(struct app *a, int k, int repeat, double now)
 {
+     /* in the last minute of the sleep timer any key (POWER aside: the
+      * system acts on it) cancels it, and does nothing else */
+     if (a->sleep_warned && k != DIKS_POWER && k != DIKS_POWER2) {
+          sleep_cancel(a, "key", now, 1);
+          return;
+     }
      /* keys that mean the same everywhere */
      switch (k) {
      case DIKS_POWER:
@@ -1579,6 +1655,12 @@ int main(int argc, char **argv)
      a->bar_expected = read_bar_expected();
      printf("soundbar expected: %d (remembered)\n", a->bar_expected);
      poll_arc(a, t0);
+     {
+          /* a timer set before we started: count from now */
+          int st = 0;
+          if (biz_get_int(BIZ_KEY_SLEEP_TIMER, &st) == 1 && st > 0)
+               sleep_arm(a, st, t0);
+     }
      poll_volume(a, t0);
      printf("model: %d inputs, current %s, volume %d, mute %d (%.0f ms)\n",
             a->nin, a->cur, a->vol, a->mute, (vibe_now_s() - t0) * 1000);
@@ -1654,7 +1736,12 @@ int main(int argc, char **argv)
           if (now >= a->next_arc) {
                poll_arc(a, now);
                a->next_arc = now + 2.0;
+               /* standby (POWER, or our own switch-off) ends the timer */
+               int scr = 1;
+               if (a->sleep_deadline && biz_get_int(BIZ_KEY_SCREEN_STATE, &scr) == 1 && scr == 0)
+                    sleep_cancel(a, "standby", now, 0);
           }
+          sleep_tick(a, now);
           if (now >= a->next_vol) {
                poll_volume(a, now);
                if (now >= a->next_vol)

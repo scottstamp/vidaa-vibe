@@ -31,8 +31,13 @@ void   biz_vec_free(char **v);
 #define BIZ_KEY_VOLUME        "kilby.sl2.i32.sound.main.volume"
 #define BIZ_KEY_MUTE          "kilby.sl2.i32.sound.main.mute"
 #define BIZ_ACTION_SWITCH     "kilby.sl2.action.source.switch"
-/* modeljs.system.SwitchOffTv([1]); note: no "sl2" (read in libcobalt) */
+/* modeljs.system.SwitchOffTv([reason]); note: no "sl2" (read in libcobalt).
+ * Only with gui.loop.finished = 1: before that it left the TV in a standby
+ * POWER did not wake (docs/findings/06). */
 #define BIZ_ACTION_POWER_OFF  "kilby.action.system.switch.off.tv"
+#define BIZ_POWER_OFF_SLEEP_TIMER 4      /* the stock UI's reason at sleep-timer end */
+/* 1 screen on, 0 off (standby) */
+#define BIZ_KEY_SCREEN_STATE  "kilby.sl2.i32.system.enum.screen.state"
 /* stock SDK: system.uiLoadFinish(1) -> modeljs.system.setGuiLoopFinished(1).
  * 1 with the stock UI up; a blank page never sets it. */
 #define BIZ_KEY_GUI_LOOP_FINISHED "kilby.sl2.i32.system.gui.loop.finished"
@@ -78,5 +83,7 @@ int biz_switch_input(const char *id);
 int biz_set_picture_mode(int mode);
 /* stock: source.InputRename([sourceId, rename]) */
 int biz_rename_input(const char *id, const char *name);
+/* stock: system.SwitchOffTv([reason]) */
+int biz_switch_off_tv(int reason);
 
 #endif

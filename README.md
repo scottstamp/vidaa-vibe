@@ -17,7 +17,7 @@ further: the stock UI is the thing being replaced.
 | Map of the UI stack | done for the outside: engine, bundle, A/B slots, input, display |
 | The UI's own native API | not mapped |
 | Native route (own DirectFB client) | works: `native/vibe` joins the UI's DirectFB world, shows a window, gets focus and remote keys |
-| TV functions from native code | inputs, input names (presets or an on-screen keyboard), volume and mute (follows a soundbar over ARC), picture, sound, game and sleep-timer settings, through the vendor's model facade; POWER (standby and wake) handled by the system once our UI reports itself loaded |
+| TV functions from native code | inputs, input names (presets or an on-screen keyboard), volume and mute (follows a soundbar over ARC), picture, sound and game settings, a sleep timer (with a last-minute countdown that any key cancels), through the vendor's model facade; POWER (standby and wake) handled by the system once our UI reports itself loaded |
 | Our UI at boot | `vibe-ui` starts from the boot hook 8–10 s into boot; the TV restores the last input by itself. CEC (soundbar, waking HDMI devices) takes ~30 s after a cold boot, in `tvmain`, as with the stock OS |
 | Anything replaced | the stock UI boots from slot B as an empty page, and is stopped once `vibe-ui` runs, with `app_man` and the stock services the TV does not use; slot A untouched; way back in [06](docs/findings/06-native-route.md) |
 | Hisense's servers | blocked (DNS for their domains, all traffic of their updaters and reporters); the internet stays open for third-party services |
