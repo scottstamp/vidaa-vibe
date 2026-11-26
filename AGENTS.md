@@ -32,6 +32,15 @@ HDMI inputs only: no live TV, none of the built-in apps.
 `systemserver` and `tvmain` stay: they handle the remote, power, picture,
 sound and CEC. The stock bundle in `/APPS/channelA` is untouched.
 
+Jellyfin (owner-tested; record in
+[docs/findings/07-jellyfin.md](docs/findings/07-jellyfin.md), summary at
+its top): a Jellyfin card on vibe-ui's Home opens a panel laid out like
+the web client (Home/Favourites/Search tabs, shelves, poster grids, detail
+page). Playback runs in a child, `vibe-play`, through Hisense's HMP
+library. It attaches to MI, switches the source to `DMP` before playing,
+and switches back to the input after. If the child dies, vibe-ui goes
+input → DMP → input to get the picture back.
+
 Ways back (all over SSH, each documented in 06-native-route.md):
 
 | Switch | Effect |
@@ -41,6 +50,7 @@ Ways back (all over SSH, each documented in 06-native-route.md):
 | `touch /var/local/vibe/jf.off` | no Jellyfin card on Home, from the next vibe-ui start (nothing of the Jellyfin code runs until the card is opened) |
 | `touch /var/local/vibe-stock` | at the next boot, `boot.sh` restores the original runtime file (md5-checked) and starts nothing; the stock UI is back from the boot after |
 | `HOOK_STEP=revert sh /var/local/vibe/hook-patch.sh` | takes our block out of the hook |
+| `touch /var/local/vibe/jf.force-transcode` | test only: every Jellyfin play asks the server for its HLS conversion (remove it after) |
 
 ## Ground rules
 
@@ -86,13 +96,22 @@ Ways back (all over SSH, each documented in 06-native-route.md):
   restarting the UI while they use it, opening menus through the dev hook,
   switching inputs. Reboots (`sync; /bin/reboot`) come back on their own.
 - **Keys and tokens stay in `server/keys/`** (gitignored).
+- **Never sign out of Jellyfin from a test.** Signing out revokes the token
+  on the server, and tests run with a copy of the UI's session; it happened
+  once and the owner had to sign in again. `jfui_test` sets `JFUI_TEST`,
+  which makes the panel refuse.
+- **No thread-local variables in TV binaries** (`__thread`,
+  `_Thread_local`, stb_image's defaults). With zig they add a dependency on
+  `ld-linux-armhf.so.3`, which this TV lacks: the binary does not start,
+  and vibe-ui would loop in boot.sh. `build.sh` fails on such a binary.
 
 ## Building and deploying
 
 - Build in WSL: `wsl.exe -e bash native/build.sh` (zig, armv7 hard-float,
   glibc 2.21). WSL cannot reach the TV.
 - Deploy from Windows: `TV_HOST=192.168.2.152 native/deploy.sh`. It copies
-  binaries and scripts and starts nothing.
+  binaries, scripts and `native/fonts/` (Noto Sans, OFL) and starts nothing.
+  vibe-ui falls back to the stock Roboto if a font is missing.
 - Apply: `sh /var/local/vibe/restart-ui.sh` on the TV (restarts `boot.sh`
   and `vibe-ui`; `debloat.sh` runs once per boot).
 - The TV's address is DHCP-assigned; `server/tv` defaults to an old one, so
@@ -122,7 +141,11 @@ Ways back (all over SSH, each documented in 06-native-route.md):
   stock UI comes back.)
 - Write anything with backslashes or quotes to a file first (or edit with a
   tool): heredocs and `sed` replacement strings have broken C strings here
-  more than once.
+  more than once. Python one-off edits did too: a `
+` became a real
+  newline, and non-ASCII text came out double-encoded ("Â·" for "·"). Use
+  raw strings or C escapes, and after an edit check the source for
+  `Ã[-¿]Â` byte pairs.
 
 ## Findings discipline
 
@@ -140,7 +163,9 @@ tracked file if it quotes vendor code or carries the unit's identifiers.
 | `server/keys/` | SSH key, pinned host key, pairing material (gitignored) |
 | `server/vidaa_server.py`, `server/pair.py` | alvidaa's launcher server and MQTT pairing, copied as they were |
 | `native/src/` | `vibe-ui` and the tools `vibe`, `vibe-model`, `vibe-gam` |
+| `native/src/jf*.c`, `http.c`, `vibe-play.c`, `vibe-jf.c` | Jellyfin: API (`jf.c`), panel (`jfui.c`), images (`jfimg.c`), subtitles (`jfsub.c`), the player child, a command-line client |
+| `native/fonts/` | Noto Sans (OFL), deployed to `/var/local/vibe/fonts`; `*.ttf` is binary in `.gitattributes` |
 | `native/tv/` | the scripts deployed to `/var/local/vibe` (`boot.sh`, `debloat.sh`, `restart-ui.sh`, `hook-patch.sh`, probes) |
 | `native/slotb/` | the blank page for slot B and its installer |
-| `native/tools/` | vendor-ABI tools, screenshots, `gfx_bench` |
+| `native/tools/` | vendor-ABI tools, screenshots, `gfx_bench`, `jfui_test` (the Jellyfin panel without DirectFB, over SSH) |
 | `research/` | recon scripts, raw output, screenshots (gitignored) |

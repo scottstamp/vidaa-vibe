@@ -5,7 +5,47 @@ Started 2026-11-25 overnight, read-only on the TV (no reboots, nothing on
 screen). Raw output: `research/jellyfin/` (gitignored). Code: `native/src/jf.c`,
 `http.c`, `vibe-jf.c`.
 
-## Short version
+## Where it stands (2026-11-26, owner-tested on the screen)
+
+Everything below works on the TV unless marked otherwise.
+
+- **Panel** (vibe-ui, `jfui.c`): server choice, Quick Connect, then Home
+  in the web client's layout: tabs Home / Favourites / Search; shelves My
+  Media, Continue Watching, Next Up, Latest per library; poster grids for
+  libraries; a detail page with the backdrop, poster, meta line, overview
+  and the buttons Resume / Play from start / Mark watched / Favourite.
+  Images come from `jfimg.c` (own thread, stb_image, cache). Font: Noto
+  Sans; music notes come from the stock symbols font.
+- **Playback** (`vibe-play`, a child process, HMP from `libhmplayer.so`).
+  What it takes, each step found the hard way (sections below):
+  1. preload DirectFB, `libdfb_renderclient` and libcurl; `cspDebugInit()`;
+     the GStreamer registry built in-process;
+  2. `MI_SYS_Init(NULL)` and `MI_AOUT_Init` (the process attaches to MI);
+  3. `source.switch [ts, 9, "DMP"]` before `HMPCreate`, and back to the
+     saved input at stop. Without it the decoders run but the picture
+     path stays on HDMI;
+  4. the URL in word 0 and the MIME type in word 4 of `HMPUriPara_s`;
+  5. `SetDisplayRect` in panel pixels (3840x2160), fitted to the picture's
+     aspect from event 19 (black bars);
+  6. resume: start at 0 and seek, audio muted and the UI's loading cover
+     up until the position passes the target;
+  7. the end: event 7, or event 8 plus a frozen position.
+- **Direct play** for anything the hardware decodes. The server's **HLS
+  conversion** (`master.m3u8`, TS) also plays, seeks and resumes; tested
+  forced with `/var/local/vibe/jf.force-transcode`.
+- **Tracks:** audio switched in the player (`HMPSelectTrack`, ids from event
+  256), English by default. Text subtitles fetched as SRT and drawn by the
+  panel: off by default, or English forced. DOWN or the CC key (`0xf069`)
+  opens the menu.
+- **Reported to the server:** start, progress every 10 s, pause, stop,
+  played at the end, favourites.
+- **Recovery:** if vibe-play dies, vibe-ui goes input → DMP → input and the
+  picture comes back (kill test passed).
+- **Not done:** picture-based subtitles (burn-in; pinned by the owner, no
+  such content); the large-library paging test (not enough content);
+  password sign-in.
+
+## First night (2026-11-25), as written then
 
 - **jellyfin-desktop cannot be ported.** It is Qt 6, QtWebEngine
   (Chromium) and mpv. The TV has none of them, glibc 2.21 is too old for
