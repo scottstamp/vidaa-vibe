@@ -15,6 +15,9 @@
  *   in:  open URL [START_MS]   (first line)
  *        pause | resume | seek MS | stop | stop keep | rect X Y W H Z | pts
  *        ("stop keep": stop without switching back to the input)
+ *        track audio K   (the K-th audio track of the file, 0-based)
+ *   out: also "track N id ID type T lang L [selected]" once the player has
+ *        the track list
  *   out: state opening|prepared|playing|paused|stopped
  *        pos MS RAW0 RAW1 RAW2   (every second while playing; MS is our
  *                                 estimate, RAW* what HMPGetPts gave)
@@ -81,6 +84,7 @@ static struct {
      int (*SetDisplayRect)(hmp_t, struct hmp_rect, struct hmp_rect, unsigned);
      int (*SetComponentMuteState)(hmp_t, int, int);
      int (*SetSubtitleShowState)(hmp_t, int);
+     int (*SelectTrack)(hmp_t, int type, int id);
 } H;
 
 /* ---- output ------------------------------------------------------------- */
@@ -159,9 +163,61 @@ static void say_ended(void)
      say("ended");
 }
 
+/* The track list, as the browser backend gets it (static analysis,
+ * research/jellyfin/hmp-tracks-re.md): event 256 with extra -> {int state;
+ * HMPMetaData_s *md}, the list there when state == 2. md: count at +0x20,
+ * then 0x30-byte HMPTrackInfo_s records: +0 id (what HMPSelectTrack takes),
+ * +4 type (1 video, 2 audio, 4 subtitle), +0xc language, +0x18 selected.
+ * The wrapper lives on the player's stack: copy during the callback. */
+#define HMP_EV_PREPARED 256
+#define HMP_TRACK_AUDIO 2
+#define MAX_TRACKS 32
+static struct { int id, type, selected; char lang[8]; } tracks[MAX_TRACKS];
+static volatile int ntracks;
+
+static int ptr_ok(uintptr_t p) { return p > 0x10000 && p < 0xc0000000u; }
+
+static void read_tracks(void *extra)
+{
+     if (!ptr_ok((uintptr_t)extra)) return;
+     const int32_t *wrap = extra;
+     if (wrap[0] != 2 || !ptr_ok((uint32_t)wrap[1])) return;
+     const uint8_t *md = (const uint8_t *)(uintptr_t)(uint32_t)wrap[1];
+     uint32_t count = *(const uint32_t *)(md + 0x20);
+     if (count > MAX_TRACKS) count = MAX_TRACKS;
+     int n = 0;
+     for (uint32_t i = 0; i < count; i++) {
+          const uint8_t *t = md + 0x24 + i * 0x30;
+          tracks[n].id = *(const int32_t *)t;
+          tracks[n].type = *(const int32_t *)(t + 4);
+          tracks[n].selected = t[0x18];
+          uintptr_t lp = *(const uint32_t *)(t + 0xc);
+          tracks[n].lang[0] = 0;
+          if (ptr_ok(lp)) snprintf(tracks[n].lang, sizeof tracks[n].lang, "%s", (const char *)lp);
+          say("track %d id %d type %d lang %s%s", n, tracks[n].id, tracks[n].type,
+              tracks[n].lang, tracks[n].selected ? " selected" : "");
+          n++;
+     }
+     ntracks = n;
+}
+
+/* the k-th audio track (0-based, in the file's order) */
+static void select_audio(int k)
+{
+     for (int i = 0, a = 0; i < ntracks; i++) {
+          if (tracks[i].type != HMP_TRACK_AUDIO) continue;
+          if (a++ != k) continue;
+          H.SetComponentMuteState(player, 1, 0);        /* as the browser does */
+          say("track audio %d id %d -> %d", k, tracks[i].id, H.SelectTrack(player, HMP_TRACK_AUDIO, tracks[i].id));
+          return;
+     }
+     say("error no audio track %d (%d tracks)", k, ntracks);
+}
+
 static void on_event(hmp_t h, int ev, void *extra)
 {
      say("event %d %ld", ev, (long)(intptr_t)extra);
+     if (ev == HMP_EV_PREPARED) read_tracks(extra);
      if (ev == HMP_EV_VIDEO_END) say_ended();
      else if (ev == HMP_EV_AUDIO_END) audio_ended = 1;
      uintptr_t x = (uintptr_t)extra;
@@ -231,6 +287,7 @@ static int load(void)
      SYM(Init); SYM(Create); SYM(RegisterCallback); SYM(UnRegisterCallback); SYM(SetURI);
      SYM(Prepare); SYM(Start); SYM(Pause); SYM(Resume); SYM(Seek); SYM(Stop); SYM(Destroy);
      SYM(GetPts); SYM(SetDisplayRect); SYM(SetComponentMuteState); SYM(SetSubtitleShowState);
+     SYM(SelectTrack);
 #undef SYM
      return 0;
 }
@@ -545,6 +602,8 @@ int main(int argc, char **argv)
                r = H.Seek(player, ms);
                if (r == 0) clock_set((double)ms, !paused);
                say("seek %llu -> %d", (unsigned long long)ms, r);
+          } else if (!strncmp(line, "track audio ", 12)) {
+               if (player) select_audio(atoi(line + 12));
           } else if (!strncmp(line, "rect ", 5)) {
                struct hmp_rect rc;
                if (sscanf(line + 5, "%d %d %d %d %d", &rc.v[0], &rc.v[1], &rc.v[2], &rc.v[3], &rc.v[4]) == 5) {

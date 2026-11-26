@@ -1288,10 +1288,29 @@ static int menu_items(int *idx, int max)
 
 static int menu_head(int v) { return v == MENU_HEAD_AUD || v == MENU_HEAD_SUB; }
 
-/* another audio track: playback restarts here from the server's remux */
+/* another audio track: the TV's player switches (HMPSelectTrack, via
+ * vibe-play's "track audio K", K = its place among the file's audio
+ * tracks). A direct-played file has them all; the server's remux had
+ * the default only, whatever was asked (measured), so a conversion
+ * restarts as below */
 static void switch_audio(int index, double now)
 {
      if (!U.play || index == U.play->audio_index) return;
+     if (U.play->method != JF_TRANSCODE) {
+          int k = 0;
+          for (int i = 0; i < U.play->nstreams; i++) {
+               if (strcmp(U.play->streams[i].type, "Audio")) continue;
+               if (U.play->streams[i].index == index) break;
+               k++;
+          }
+          player_send("track audio %d", k);
+          U.play->audio_index = index;          /* reported to the server */
+          U.menu_on = 0;
+          U.osd_until = now + 3;
+          report(1, now);
+          U.dirty = 1;
+          return;
+     }
      int64_t ticks = (int64_t)(cur_pos(now) * TICKS_PER_MS);
      int sub = U.sub_index;
      report(1, now);

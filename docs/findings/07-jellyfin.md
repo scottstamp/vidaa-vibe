@@ -564,3 +564,15 @@ What was measured:
   requests were served by one transcode job (not ruled out).
 - Next: switch tracks in the TV's player instead (`HMPSelectTrack`,
   static analysis running); that also avoids the restart.
+
+**Audio tracks in the player (static: research/jellyfin/hmp-tracks-re.md).**
+Event 256's `extra` is `{int state; HMPMetaData_s *md}`, with the track
+list there when state == 2. md has the count at +0x20 and 0x30-byte
+records from +0x24: id +0 (the value `HMPSelectTrack` takes), type +4
+(1 video, 2 audio, 4 subtitle), language +0xc, selected +0x18. The browser
+switches with `HMPSetComponentMuteState(h, 1, 0)` then
+`HMPSelectTrack(h, 2, id)` and never unselects. Component values: 1
+audio, 2 video, 3 subtitle. A wrong id quietly selects the first audio
+track. vibe-play logs the list (`track N id ...`) and takes
+`track audio K`; the panel sends that for direct play (no restart) and
+keeps the restart only for conversions.
