@@ -412,8 +412,8 @@ static void hints(struct app *a, cv_t *c, int cx, int y, const char *const *pair
 #define CARD_R   28
 
 #define N_SETTINGS (N_PAGES + 1)          /* the pages, then Input settings */
-#define SET_CARD_W 300
-#define SET_CARD_GAP 28
+#define SET_CARD_W 330        /* 300 was tight for "Input settings" in Noto Sans */
+#define SET_CARD_GAP 20
 
 static void home_card_w(struct app *a, cv_t *c, int x, int y, int cw, int focus, const char *title,
                       const char *sub, int dot_state /* -1 none, 0 off, 1 on */, int now)
@@ -497,7 +497,7 @@ static void draw_home(struct app *a, cv_t *c)
 
 /* ---- quick inputs: left sheet */
 #define Q_X 40
-#define Q_W 600
+#define Q_W 660
 
 static void draw_quick(struct app *a, cv_t *c)
 {
@@ -531,7 +531,7 @@ static void draw_quick(struct app *a, cv_t *c)
 }
 
 /* ---- right sheet: Picture, Rename */
-#define R_W 760
+#define R_W 836
 static int r_x(struct app *a) { return a->W - 40 - R_W; }
 
 static void slider(cv_t *c, int x, int y, int w, int v, int focus)
