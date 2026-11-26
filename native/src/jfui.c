@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define STATE_DEFAULT "/var/local/vibe/state/jellyfin"
@@ -565,11 +566,11 @@ static void build_rows(void)
                          it->type == JF_MUSICVIDEO;
           if (playable && it->position_ticks > 0) {
                add_row(0, "Resume", it, A_RESUME);
-               add_row(0, "Play from the start", it, A_RESTART);
+               add_row(0, "Play from start", it, A_RESTART);
           } else if (playable) {
                add_row(0, "Play", it, A_PLAY);
           }
-          if (playable) add_row(0, it->played ? "Mark as unwatched" : "Mark as watched", it,
+          if (playable) add_row(0, it->played ? "Mark unwatched" : "Mark watched", it,
                                 it->played ? A_UNPLAYED : A_PLAYED);
           break;
      }
@@ -1104,7 +1105,7 @@ int jfui_tick(double now)
           else if (U.osd_until > now && now >= U.next_redraw) { U.next_redraw = now + 1; U.dirty = 1; }
      }
      if (U.err_until && now >= U.err_until) { U.err_until = 0; U.dirty = 1; }
-     if (jfimg_changed() && card_screen()) U.dirty = 1;
+     if (jfimg_changed() && (card_screen() || U.scr == J_DETAIL)) U.dirty = 1;
      int d = U.dirty;
      U.dirty = 0;
      return d && U.on;
@@ -1262,6 +1263,11 @@ int jfui_key(int k, int repeat, double now)
 {
      if (U.scr == J_PLAYER) { key_player(k, repeat, now); return 1; }
      if (card_screen()) return card_key(k, repeat, now);
+     if (U.scr == J_DETAIL) {          /* the actions are a row of buttons */
+          if (k == DIKS_CURSOR_LEFT) { move(-1); return 1; }
+          if (k == DIKS_CURSOR_RIGHT) { move(1); return 1; }
+          if (k == DIKS_CURSOR_UP || k == DIKS_CURSOR_DOWN) return 1;
+     }
      switch (k) {
      case DIKS_CURSOR_UP:   move(-1); return 1;
      case DIKS_CURSOR_DOWN: move(1); return 1;
@@ -1582,6 +1588,161 @@ static void draw_player(struct canvas *c, double now)
      }
 }
 
+/* text wrapped to maxw pixels, at most maxl lines (the last ends in an
+ * ellipsis if cut); returns the number of lines drawn */
+static int wrap(IDirectFBFont *f, const char *s, int x, int y, int line_h, int maxw, int maxl,
+                uint32_t col)
+{
+     int lines = 0;
+     while (*s && lines < maxl) {
+          char buf[512];
+          int n = 0, last_space = -1, w = 0;
+          for (;;) {
+               if (!s[n] || n >= (int)sizeof buf - 8) break;
+               int m = n + 1;
+               while (((unsigned char)s[m] & 0xc0) == 0x80) m++;      /* whole UTF-8 chars */
+               memcpy(buf, s, (size_t)m);
+               buf[m] = 0;
+               w = m * 15;
+               if (f) f->GetStringWidth(f, buf, -1, &w);
+               if (w > maxw) break;
+               if (s[n] == ' ') last_space = n;
+               n = m;
+          }
+          int cut = n;
+          if (s[n] && last_space > 0) cut = last_space;
+          if (cut <= 0) cut = n > 0 ? n : 1;
+          if (lines == maxl - 1 && s[cut]) {
+               char out[520];
+               snprintf(buf, sizeof buf, "%.*s", cut, s);
+               fit(f, buf, maxw - 20, out, sizeof out - 4);
+               size_t l = strlen(out);
+               if (l < 3 || strcmp(out + l - 3, "\xe2\x80\xa6")) snprintf(out + l, sizeof out - l, "\xe2\x80\xa6");
+               text(f, x, y + lines * line_h, line_h, col, out, -1);
+          } else {
+               snprintf(buf, sizeof buf, "%.*s", cut, s);
+               text(f, x, y + lines * line_h, line_h, col, buf, -1);
+          }
+          lines++;
+          s += cut;
+          while (*s == ' ') s++;
+     }
+     return lines;
+}
+
+/* Jellyfin's web layout: the backdrop behind, darkened toward the text;
+ * the poster (films) or the still (episodes) on the left; title, a meta
+ * line, the overview; the actions as a row of buttons */
+static void draw_detail(struct canvas *c, double now)
+{
+     const struct jf_item *it = &U.detail;
+     int W = U.h.W, H = U.h.H;
+     const char *bid = NULL, *btag = NULL;
+     if (it->backdrop_tag[0]) { bid = it->id; btag = it->backdrop_tag; }
+     else if (it->parent_backdrop_id[0] && it->parent_backdrop_tag[0]) {
+          bid = it->parent_backdrop_id; btag = it->parent_backdrop_tag;
+     }
+     const struct jfimg *bd = bid ? jfimg_get(bid, "Backdrop", btag, W, H) : NULL;
+     int land = it->type == JF_EPISODE || it->type == JF_VIDEO || it->type == JF_MUSICVIDEO;
+     int pw = land ? 480 : 300, ph = land ? 270 : 450;
+     const char *pid = it->id, *ptag = it->primary_tag;
+     if (!ptag[0] && it->type == JF_EPISODE && it->series_id[0] && it->series_primary_tag[0]) {
+          /* no still: the series poster */
+          pid = it->series_id; ptag = it->series_primary_tag; land = 0; pw = 300; ph = 450;
+     }
+     const struct jfimg *po = ptag[0] ? jfimg_get(pid, "Primary", ptag, pw, ph) : NULL;
+     int px = 120, py = 170, tx = px + pw + 64, tw = W - tx - 120;
+
+     if (c) {
+          if (bd) {
+               gfx_image(c, 0, 0, W, H, 0, bd->px, bd->w, 255);
+               /* dark toward the text, and at the bottom for the hints */
+               gfx_rrect_hgrad(c, 0, 0, W, H, 0, 0xf205070c, 0x9905070c);
+               gfx_rrect(c, 0, H - 220, W, 220, 0, 0x8005070c);
+          }
+          if (po) gfx_image(c, px, py, pw, ph, 16, po->px, po->w, 255);
+          else {
+               gfx_rrect(c, px, py, pw, ph, 16, 0xff1c2130);
+               gfx_rrect_outline(c, px, py, pw, ph, 16, 1, K_PANEL_EDGE);
+          }
+          if (it->position_ticks > 0 && it->runtime_ticks > 0) {
+               int fw = (int)((int64_t)(pw - 24) * it->position_ticks / it->runtime_ticks);
+               gfx_rrect(c, px + 12, py + ph - 20, pw - 24, 6, 3, 0xa0000000);
+               if (fw >= 6) gfx_rrect_hgrad(c, px + 12, py + ph - 20, fw, 6, 3, K_ACCENT_L, K_ACCENT_R);
+          }
+     }
+
+     /* title, and for an episode its place in the series */
+     int y = py - 10;
+     char t[300], ft[320];
+     if (it->type == JF_EPISODE && it->series_name[0]) {
+          if (!c) {
+               fit(U.h.f_title, it->series_name, tw, ft, sizeof ft);
+               text(U.h.f_title, tx, y, 80, K_TEXT, ft, -1);
+               if (it->season >= 0 && it->episode >= 0)
+                    snprintf(t, sizeof t, "S%d:E%d - %s", it->season, it->episode, it->name);
+               else snprintf(t, sizeof t, "%s", it->name);
+               fit(U.h.f_bold, t, tw, ft, sizeof ft);
+               text(U.h.f_bold, tx, y + 84, 54, K_TEXT, ft, -1);
+          }
+          y += 84 + 60;
+     } else {
+          if (!c) {
+               fit(U.h.f_title, it->name, tw, ft, sizeof ft);
+               text(U.h.f_title, tx, y, 80, K_TEXT, ft, -1);
+          }
+          y += 88;
+     }
+
+     /* meta: year, runtime, rating, how long is left or when it ends */
+     char meta[300] = "", d[48];
+     size_t l = 0;
+#define META(...) do { l = strlen(meta); snprintf(meta + l, sizeof meta - l, "%s", l ? "   \xc2\xb7   " : ""); \
+                       l = strlen(meta); snprintf(meta + l, sizeof meta - l, __VA_ARGS__); } while (0)
+     if (it->year) META("%d", it->year);
+     if (it->runtime_ticks > 0) { fmt_dur(it->runtime_ticks, d, sizeof d); META("%s", d); }
+     if (it->official_rating[0]) META("%s", it->official_rating);
+     if (it->rating > 0) META("%.1f / 10", it->rating);
+     if (it->runtime_ticks > 0) {
+          int64_t left = it->runtime_ticks - (it->position_ticks > 0 ? it->position_ticks : 0);
+          if (it->position_ticks > 0) { fmt_dur(left, d, sizeof d); META("%s left", d); }
+          time_t end = time(NULL) + (time_t)(left / 10000000);
+          struct tm tm;
+          localtime_r(&end, &tm);
+          strftime(d, sizeof d, "%H:%M", &tm);
+          META("Ends at %s", d);
+     }
+     if (it->played) META("Watched");
+#undef META
+     if (!c && meta[0]) text(U.h.f_small, tx, y, 40, K_TEXT2, meta, -1);
+     y += 60;
+
+     /* the overview, wrapped to the column */
+     if (!c && it->overview) wrap(U.h.f_small, it->overview, tx, y, 40, tw, 6, 0xffd0d6e2);
+
+     /* the actions: a row of buttons under the poster */
+     int by = py + (ph > 450 ? ph : 450) + 60, bx = px, bh = 72;
+     for (int i = 0; i < U.nrows; i++) {
+          if (U.rows[i].header) continue;
+          int bw = 0;
+          if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, U.rows[i].title, -1, &bw);
+          else bw = (int)strlen(U.rows[i].title) * 18;
+          bw += 80;
+          int foc = i == U.sel;
+          if (c) {
+               if (foc) gfx_rrect(c, bx, by, bw, bh, bh / 2, 0xffffffff);
+               else {
+                    gfx_rrect(c, bx, by, bw, bh, bh / 2, 0x40ffffff);
+                    gfx_rrect_outline(c, bx, by, bw, bh, bh / 2, 1, 0x40ffffff);
+               }
+          } else {
+               text(U.h.f_bold, bx + bw / 2, by, bh, foc ? 0xff0b0e16 : K_TEXT, U.rows[i].title, 0);
+          }
+          bx += bw + 24;
+     }
+     (void)now;
+}
+
 void jfui_draw(struct canvas *c, double now)
 {
      if (!U.on) return;
@@ -1592,6 +1753,14 @@ void jfui_draw(struct canvas *c, double now)
           return;
      }
      if (c) gfx_fill_vgradient_full(c, 0xf005070c, 0xfa05070c);
+     if (U.scr == J_DETAIL) {
+          draw_detail(c, now);
+          if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W - P_X, H - 150, 50, K_TEXT2, U.busy_msg, 1);
+          if (!c && U.err_until > now) text(U.h.f_item, P_X, H - 150, 50, 0xffff8080, U.err, -1);
+          static const char *const hd[] = { "LEFT/RIGHT", "Move", "OK", "Select", "BACK", "Back" };
+          U.h.hints(U.h.ctx, c, W / 2, H - 96, hd, 3);
+          return;
+     }
      const char *title = "Jellyfin";
      char tbuf[160];
      switch (U.scr) {
