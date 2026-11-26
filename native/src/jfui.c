@@ -607,9 +607,14 @@ static void player_reap(void)
            * switching to the input alone does not bring it back (video
            * info stayed 0,0,0,0). Going through DMP and back rebuilds the
            * path, as a clean stop does (verified on the screen,
-           * 2026-11-26). Blocks ~3 s, only on this path. */
+           * 2026-11-26). The dead player left the source on DMP, where a
+           * switch to DMP does nothing: first the input (ends that DMP
+           * session), then DMP, then the input. Blocks ~5 s, only here. */
           if (!clean && U.prev_input[0] && strcmp(U.prev_input, "DMP")) {
-               fprintf(stderr, "jellyfin: player died (status 0x%x), DMP -> %s\n", st, U.prev_input);
+               fprintf(stderr, "jellyfin: player died (status 0x%x), %s -> DMP -> %s\n",
+                       st, U.prev_input, U.prev_input);
+               biz_switch_input(U.prev_input);
+               sleep(2);
                biz_switch_input("DMP");
                sleep(3);
                fprintf(stderr, "jellyfin: back to %s -> %d\n", U.prev_input, biz_switch_input(U.prev_input));

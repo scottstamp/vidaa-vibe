@@ -396,3 +396,10 @@ nothing: `kilby.sl2.str.servicemode.videoinfo.source` stayed `0,0,0,0`.
 Switching to `DMP`, waiting 3 s, then `HDMI3` brought the picture back
 (video info `4096,2160,60,0`; owner saw HDMI3). vibe-ui now does that
 after any unclean exit of the player (`player_reap`).
+
+Second kill test, with that recovery built in: the log showed `DMP ->
+HDMI3`, both calls returned 1, and the screen stayed black (video info
+`0,0,0,0`). The dead player had left the source on DMP, so the switch to
+DMP did nothing and the HDMI3 switch only ended that DMP session. A second
+DMP → HDMI3 brought the picture back. vibe-ui now switches to the input,
+waits 2 s, switches to DMP, waits 3 s, then switches to the input again.
