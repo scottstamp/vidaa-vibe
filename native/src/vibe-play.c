@@ -137,9 +137,23 @@ static void clock_set(double ms, int run)
      pthread_mutex_unlock(&st_lock);
 }
 
+/* HMP event numbers, from the browser backend's hiOnHMPCallBack
+ * (libhisense-uva-backend, dispatch at 0x78060): 7 HMP_VIDEO_EVENT_END_OF_PLAY,
+ * 8 HMP_AUDIO_EVENT_END_OF_PLAY. The backend reports PlaybackFinished on them. */
+#define HMP_EV_VIDEO_END 7
+#define HMP_EV_AUDIO_END 8
+
 static void on_event(hmp_t h, int ev, void *extra)
 {
+     static int ended;
      say("event %d %ld", ev, (long)(intptr_t)extra);
+     if (ev == HMP_EV_VIDEO_END && !ended) {    /* films: the video track ends it */
+          ended = 1;
+          pthread_mutex_lock(&st_lock);
+          playing = 0;
+          pthread_mutex_unlock(&st_lock);
+          say("ended");
+     }
      uintptr_t x = (uintptr_t)extra;
      if (getenv("VIBE_PLAY_DUMP") && x > 0x10000 && x < 0xc0000000u) {
           const uint32_t *w = extra;
@@ -379,6 +393,11 @@ static void *ticker(void *arg)
           struct hmp_pts pt;
           memset(&pt, 0, sizeof pt);
           int r = H.GetPts(player, &pt);
+          /* the first field is the media position in ms once the decoders
+           * run (12012 against our clock's 12485; 308350 ten seconds after
+           * a seek to 300000): follow it, our clock only fills in between */
+          if (r == 0 && pt.pts > 0 && pt.pts < (uint64_t)48 * 3600 * 1000)
+               clock_set((double)pt.pts, 1);
           say("pos %.0f %llu %lld %d%s", position(), (unsigned long long)pt.pts, (long long)pt.b,
               pt.c, r ? " (GetPts failed)" : "");
      }

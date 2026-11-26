@@ -408,3 +408,19 @@ Third kill test (input → DMP → input, deployed build 48bf6e3): vibe-ui
 logged `player died (status 0x9), HDMI3 -> DMP -> HDMI3`, and about 12 s
 after the kill the video info read `4096,2160,60,0` (HDMI3 signal on the
 main window) with no manual step.
+
+### End of play and the position (static and logs, 2026-11-26)
+
+- HMP event numbers, read in the browser backend's `hiOnHMPCallBack`
+  (libhisense-uva-backend, dispatch at 0x78060; log strings resolved
+  with `research/jellyfin/tools/xref.py`): **7 = HMP_VIDEO_EVENT_END_OF_PLAY**,
+  **8 = HMP_AUDIO_EVENT_END_OF_PLAY**. The backend sends PlaybackFinished
+  to the page on these. Not yet seen live: no test has played to the
+  end. vibe-play now sends `ended` on 7, and vibe-ui stops, reports the
+  item played and gives the input back. The clock-past-duration fallback
+  stays.
+- `HMPGetPts` first field: the media position in ms once the decoders run
+  (12012 where our wall clock said 12485; 308350 ten seconds after a seek
+  to 300000). Before the decoders opened it was 0, which the earlier
+  "returns 0" note was about. vibe-play now re-bases its clock on it every
+  second.

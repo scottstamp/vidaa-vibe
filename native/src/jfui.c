@@ -950,8 +950,8 @@ int jfui_tick(double now)
                report(1, now);
           }
           if (U.pstate == 1 && now >= U.next_report) report(1, now);
-          /* the player does not say "ended" yet (its end-of-stream event
-           * number is unknown): its clock running past the end will do */
+          /* the player says "ended" on HMP's video end-of-play event (7);
+           * in case it never comes, its clock running past the end will do */
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms + 3000) {
                stop_playback(now, 1);
                return U.on;
