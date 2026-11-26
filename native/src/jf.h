@@ -154,6 +154,10 @@ int  jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
 int  jf_report(struct jf_session *s, const char *item_id, const struct jf_play *p,
                int event, int64_t position_ticks, int paused);
 int  jf_set_played(struct jf_session *s, const char *item_id, int played);
+/* a text subtitle track of the playing source, converted to SRT by the
+ * server (embedded or sidecar alike); caller frees *data */
+int  jf_subtitle(struct jf_session *s, const char *item_id, const char *media_source_id,
+                 int index, char **data, size_t *len);
 /* end a transcode on the server (DELETE /Videos/ActiveEncodings) */
 void jf_stop_transcode(struct jf_session *s, const struct jf_play *p);
 

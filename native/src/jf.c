@@ -471,6 +471,15 @@ void jf_image_url(const struct jf_session *s, const char *id, const char *kind,
               s->server, id, kind, max_w, max_h, tag && tag[0] ? "&tag=" : "", tag ? tag : "");
 }
 
+int jf_subtitle(struct jf_session *s, const char *item_id, const char *media_source_id,
+                int index, char **data, size_t *len)
+{
+     char url[JF_URL_MAX];
+     snprintf(url, sizeof url, "%s/Videos/%s/%s/Subtitles/%d/0/Stream.srt",
+              s->server, item_id, media_source_id, index);
+     return jf_fetch(s, url, data, len);
+}
+
 int jf_fetch(struct jf_session *s, const char *url, char **data, size_t *len)
 {
      char auth[400], e[128];

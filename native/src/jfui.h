@@ -26,6 +26,9 @@ struct jfui_host {
      void (*focus)(struct canvas *c, int x, int y, int w, int h, int r);
      void (*hints)(void *ctx, struct canvas *c, int cx, int y, const char *const *pairs, int n);
      void (*sheet)(void *ctx, struct canvas *c, int x, int y, int w, int h, const char *title);
+     /* symbols missing from the UI font (music notes in subtitles), at
+      * f_bold's size; NULL if there is none */
+     IDirectFBFont *f_sym;
 };
 
 /* 1 unless switched off */

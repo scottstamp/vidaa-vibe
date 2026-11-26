@@ -51,6 +51,8 @@
 #define FONT_SEMI "/var/local/vibe/fonts/NotoSans-SemiBold.ttf"
 #define FONT_BOLD "/var/local/vibe/fonts/NotoSans-Bold.ttf"
 #define FONT_REG_STOCK  "/opt/font/Cobalt_fonts/Roboto-Regular.ttf"
+/* the stock symbols font has the music notes Noto Sans lacks (subtitles) */
+#define FONT_SYM_STOCK  "/opt/font/Cobalt_fonts/NotoSansSymbols-Regular-Subsetted.ttf"
 #define FONT_BOLD_STOCK "/opt/font/Cobalt_fonts/Roboto-Bold.ttf"
 
 /* remote keys without a DirectFB name (vibe keys, 2026-11-25) */
@@ -173,6 +175,7 @@ struct app {
      IDirectFBSurface      *s;
      IDirectFBEventBuffer  *events;
      IDirectFBFont         *f_title, *f_head, *f_item, *f_bold, *f_small, *f_tiny;
+     IDirectFBFont         *f_sym;         /* optional (NULL): symbols for subtitles */
      int W, H;
      uint32_t *back;              /* W*H ARGB drawing buffer in RAM */
      /* partial redraws (dirty == 2): only the old and new focus (and, with
@@ -1415,7 +1418,7 @@ static void open_jellyfin(struct app *a, double now)
 {
      struct jfui_host h = {
           a->s, a->f_title, a->f_head, a->f_item, a->f_bold, a->f_small, a->f_tiny,
-          a->W, a->H, a, jf_text, focus_fill, jf_hints, jf_sheet
+          a->W, a->H, a, jf_text, focus_fill, jf_hints, jf_sheet, a->f_sym
      };
      a->screen = S_JELLYFIN;
      a->dirty = 1;
@@ -2034,6 +2037,15 @@ static int setup(struct app *a, int layer_id)
          font(a, FONT_REG, 34, &a->f_item) || font(a, FONT_SEMI, 38, &a->f_bold) ||
          font(a, FONT_REG, 28, &a->f_small) || font(a, FONT_SEMI, 21, &a->f_tiny))
           return -1;
+     {    /* optional: without it, music notes in subtitles show as boxes */
+          PADDED(DFBFontDescription, fd);
+          memset(&fd, 0, sizeof(fd));
+          fd.v.flags = DFDESC_HEIGHT;
+          fd.v.height = 38;
+          if (access(FONT_SYM_STOCK, R_OK) != 0 ||
+              a->dfb->CreateFont(a->dfb, FONT_SYM_STOCK, &fd.v, &a->f_sym) != DFB_OK)
+               a->f_sym = NULL;
+     }
 
      a->s->Clear(a->s, 0, 0, 0, 0);
      a->s->Flip(a->s, NULL, 0);

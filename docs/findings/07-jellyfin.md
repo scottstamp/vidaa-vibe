@@ -462,3 +462,27 @@ notofonts/notofonts.github.io, in `native/fonts/`, deployed to
 Noto files plus Roboto, which stays as the fallback if a Noto file is
 missing or fails to load. The earlier "Â·" and "â€¦" on the loading screen
 were double-encoded text from an edit, not missing glyphs.
+
+### Detail page and subtitles (2026-11-26, not yet seen on screen)
+
+- Detail page in the web client's layout: backdrop (the series' for
+  episodes), poster or still with progress, title / S:E - name, meta line
+  (year, runtime, rating, time left, "Ends at", 24-hour like vibe-ui's
+  clock), overview wrapped by measured width, and the actions as pill
+  buttons (LEFT/RIGHT). Checked off-screen with jfui_test.
+- Subtitles: text tracks come from
+  `/Videos/{item}/{mediaSource}/Subtitles/{index}/0/Stream.srt`. The
+  server converts embedded and sidecar tracks alike: South Park S29E6's
+  embedded "SDH - English - SUBRIP" gave 522 cues (`vibe-jf sub ID INDEX`
+  on the TV). `jfsub.c` parses them (BOM, CRLF, tags, VTT-style times) and
+  the panel draws the cue under the video timeline, interpolating the
+  player's once-a-second position. In the player, DOWN (or the remote's
+  SUBTITLE key, if it sends DIKS_SUBTITLE) opens the track menu. The
+  server's default track for the user starts automatically and the choice
+  goes into the progress reports. Picture-based tracks (PGS, DVD, DVB) are
+  listed greyed out: switching to one needs a restart through a burning-in
+  transcode, which is not done yet.
+- Noto Sans has no music notes (U+2669..266F; checked with fontTools).
+  Subtitle lines are drawn in runs, with the notes in the stock
+  `/opt/font/Cobalt_fonts/NotoSansSymbols-Regular-Subsetted.ttf`, which has
+  ♪ ♫ ♬.

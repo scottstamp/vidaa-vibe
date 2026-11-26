@@ -13,10 +13,12 @@
  *   vibe-jf [-s STATE] episodes SERIES SEASON | item ID
  *   vibe-jf [-s STATE] play ID [START_SECONDS]   negotiate, print the URL
  *   vibe-jf [-s STATE] image ID OUT.jpg [W H]
+ *   vibe-jf [-s STATE] sub ID INDEX            a text track as SRT: count, first cues
  *
  * STATE defaults to /var/local/vibe/state/jellyfin (the TV) or $JF_STATE.
  */
 #include "jf.h"
+#include "jfsub.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -158,6 +160,21 @@ int main(int argc, char **argv)
                       st->title, st->is_default ? " (default)" : "", st->is_external ? " (external)" : "");
           }
           printf("audio %d, subtitles %d\n", p.audio_index, p.subtitle_index);
+          return 0;
+     }
+     if (strcmp(cmd, "sub") == 0 && a + 1 < argc) {
+          static struct jf_play p;
+          if (jf_playback(&S, argv[a], 0, -1, JF_SUB_DEFAULT, &p)) return fail(cmd);
+          char *d;
+          size_t n;
+          if (jf_subtitle(&S, argv[a], p.media_source_id, atoi(argv[a + 1]), &d, &n)) return fail(cmd);
+          struct jf_subs subs;
+          jf_subs_parse(d, n, &subs);
+          printf("%zu bytes, %d cues\n", n, subs.n);
+          for (int i = 0; i < subs.n && i < 5; i++)
+               printf("  %d-%d %s\n", subs.c[i].start_ms, subs.c[i].end_ms, subs.c[i].text);
+          jf_subs_free(&subs);
+          free(d);
           return 0;
      }
      if (strcmp(cmd, "image") == 0 && a + 1 < argc) {

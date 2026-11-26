@@ -16,6 +16,7 @@
 #include "jf.h"
 #include "biz.h"
 #include "jfimg.h"
+#include "jfsub.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -53,7 +54,7 @@
 
 enum job_kind {
      JB_DISCOVER, JB_CONNECT, JB_QC_START, JB_QC_POLL, JB_HOME, JB_LIST,
-     JB_DETAIL, JB_PLAYINFO, JB_REPORT, JB_PLAYED, JB_LOGOUT, JB_STOP_TC
+     JB_DETAIL, JB_PLAYINFO, JB_REPORT, JB_PLAYED, JB_LOGOUT, JB_STOP_TC, JB_SUBS
 };
 enum list_kind { LK_CHILDREN, LK_SEASONS, LK_EPISODES };
 
@@ -80,6 +81,7 @@ struct result {
      struct jf_play *play;
      char server_name[64], user_name[64];
      int  start;
+     struct jf_subs subs;       /* JB_SUBS */
 };
 
 #define QMAX 32
@@ -120,6 +122,7 @@ static void deliver(struct result *r)
           for (int i = 0; i < 3; i++) jf_list_free(&r->lists[i]);
           free(r->item.overview);
           free(r->play);
+          jf_subs_free(&r->subs);
           free(r);
      }
 }
@@ -203,6 +206,14 @@ static void *worker(void *arg)
           case JB_PLAYED:
                r->rc = jf_set_played(&S, j.id, j.flag);
                break;
+          case JB_SUBS: {
+               char *data = NULL;
+               size_t len = 0;
+               r->rc = jf_subtitle(&S, j.id, j.arg, j.start, &data, &len);
+               if (r->rc == 0) r->rc = jf_subs_parse(data, len, &r->subs);
+               free(data);
+               break;
+          }
           case JB_LOGOUT:
                jf_logout(&S);
                jf_session_save(&S, STATE_FILE);
@@ -301,6 +312,12 @@ static struct {
      double seek_target_ms, seek_at;   /* collapsed LEFT/RIGHT presses */
      int  seek_pending;
      int  reported_start;
+     double pos_at;              /* when pos_ms was last set (the player says it every second) */
+     /* subtitles: the track shown (-1 off), its cues, the menu */
+     int  sub_index;
+     struct jf_subs subs;
+     const struct jf_cue *cue_shown;
+     int  menu_on, menu_sel;
      int  dirty;
 } U;
 
@@ -660,6 +677,38 @@ static void player_send(const char *fmt, ...)
           fprintf(stderr, "jellyfin: player write: %s\n", strerror(errno));
 }
 
+/* ---- subtitles */
+
+static const struct jf_stream *stream_of(int index)
+{
+     if (!U.play) return NULL;
+     for (int i = 0; i < U.play->nstreams; i++)
+          if (U.play->streams[i].index == index) return &U.play->streams[i];
+     return NULL;
+}
+
+/* the track to show: text tracks are fetched and drawn here; an image
+ * track was burned in by the server (it is in the picture already) */
+static void choose_subs(int index)
+{
+     jf_subs_free(&U.subs);
+     U.cue_shown = NULL;
+     U.sub_index = index;
+     if (U.play) U.play->subtitle_index = index;      /* reported to the server */
+     const struct jf_stream *st = index >= 0 ? stream_of(index) : NULL;
+     if (!st || !st->is_text) return;
+     struct job j = { .kind = JB_SUBS, .start = index };
+     snprintf(j.id, sizeof j.id, "%s", U.playing.id);
+     snprintf(j.arg, sizeof j.arg, "%s", U.play->media_source_id);
+     post(j);
+}
+
+static double cur_pos(double now)
+{
+     if (U.seek_pending) return U.seek_target_ms;
+     return U.pos_ms + (U.pstate == 1 && U.pos_at > 0 ? (now - U.pos_at) * 1000.0 : 0);
+}
+
 static void report(int event, double now)
 {
      if (!U.play) return;
@@ -776,6 +825,10 @@ static void stop_playback(double now, int ended)
      }
      player_send("stop");
      player_reap();
+     jf_subs_free(&U.subs);
+     U.cue_shown = NULL;
+     U.sub_index = -1;
+     U.menu_on = 0;
      free(U.play);
      U.play = NULL;
      U.scr = U.play_back;
@@ -814,7 +867,7 @@ static void on_player_line(char *l, double now)
           U.dirty = 1;
      } else if (!strncmp(l, "pos ", 4)) {
           double p = atof(l + 4);
-          if (!U.seek_pending) U.pos_ms = p;
+          if (!U.seek_pending) { U.pos_ms = p; U.pos_at = now; }
           if (U.osd_until > now) U.dirty = 1;
      } else if (!strncmp(l, "error ", 6)) {
           set_err(l + 6, now);
@@ -1037,12 +1090,24 @@ static void apply(struct result *r, double now)
                break;
           }
           U.pos_ms = (double)start_ms;
+          U.pos_at = 0;
           U.scr = J_PLAYER;
+          U.menu_on = 0;
+          choose_subs(U.play->subtitle_index);     /* the server's default for this user */
           U.osd_until = now + 5;
           U.next_report = now + 10;
           U.dirty = 1;
           break;
      }
+     case JB_SUBS:
+          if (U.scr == J_PLAYER && U.play && r->start == U.sub_index) {
+               jf_subs_free(&U.subs);
+               U.subs = r->subs;
+               r->subs = (struct jf_subs){ 0 };
+               U.cue_shown = NULL;
+               U.dirty = 1;
+          }
+          break;
      case JB_PLAYED:
           if (U.have_detail) {
                struct job d = { .kind = JB_DETAIL };
@@ -1077,6 +1142,7 @@ int jfui_tick(double now)
           for (int i = 0; i < 3; i++) jf_list_free(&r->lists[i]);
           free(r->item.overview);
           free(r->play);
+          jf_subs_free(&r->subs);
           free(r);
      }
      read_player(now);
@@ -1091,6 +1157,7 @@ int jfui_tick(double now)
                U.seek_pending = 0;
                player_send("seek %.0f", U.seek_target_ms);
                U.pos_ms = U.seek_target_ms;
+               U.pos_at = now;
                report(1, now);
           }
           if (U.pstate == 1 && now >= U.next_report) report(1, now);
@@ -1099,6 +1166,10 @@ int jfui_tick(double now)
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms + 3000) {
                stop_playback(now, 1);
                return U.on;
+          }
+          if (U.subs.n && U.pstate) {
+               const struct jf_cue *cue = jf_subs_at(&U.subs, (int)cur_pos(now));
+               if (cue != U.cue_shown) { U.cue_shown = cue; U.dirty = 1; }
           }
           /* the OSD clock, and its disappearance */
           if (U.osd_until && now >= U.osd_until) { U.osd_until = 0; U.dirty = 1; }
@@ -1169,9 +1240,56 @@ static void seek_by(double d_ms, double now)
      U.dirty = 1;
 }
 
+/* the subtitle menu: Off, then every subtitle track */
+static int menu_items(int *idx, int max)
+{
+     int n = 0;
+     idx[n++] = -1;
+     for (int i = 0; U.play && i < U.play->nstreams && n < max; i++)
+          if (!strcmp(U.play->streams[i].type, "Subtitle")) idx[n++] = U.play->streams[i].index;
+     return n;
+}
+
+static void key_menu(int k, int repeat, double now)
+{
+     int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
+     switch (k) {
+     case DIKS_CURSOR_UP:   if (U.menu_sel > 0) U.menu_sel--; break;
+     case DIKS_CURSOR_DOWN: if (U.menu_sel < n - 1) U.menu_sel++; break;
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: {
+          if (repeat) return;
+          const struct jf_stream *st = stream_of(idx[U.menu_sel]);
+          if (idx[U.menu_sel] >= 0 && st && !st->is_text && U.sub_index != idx[U.menu_sel]) {
+               set_err("Picture-based subtitles are not supported yet", now);
+               return;
+          }
+          choose_subs(idx[U.menu_sel]);
+          U.menu_on = 0;
+          break;
+     }
+     case DIKS_BACK: case DIKS_EXIT: case DIKS_SUBTITLE:
+          if (repeat) return;
+          U.menu_on = 0;
+          break;
+     default:
+          return;
+     }
+     U.dirty = 1;
+}
+
 static void key_player(int k, int repeat, double now)
 {
+     if (U.menu_on) { key_menu(k, repeat, now); return; }
      switch (k) {
+     case DIKS_CURSOR_DOWN: case DIKS_SUBTITLE: {
+          if (repeat || U.pstate == 0) return;
+          int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
+          U.menu_sel = 0;
+          for (int i = 0; i < n; i++) if (idx[i] == U.sub_index) U.menu_sel = i;
+          U.menu_on = 1;
+          U.dirty = 1;
+          return;
+     }
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: case DIKS_PLAYPAUSE:
      case DIKS_PAUSE: case DIKS_PLAY:
           if (repeat) return;
@@ -1186,7 +1304,7 @@ static void key_player(int k, int repeat, double now)
      case DIKS_CURSOR_RIGHT: case DIKS_FASTFORWARD:
           seek_by(30000, now);
           break;
-     case DIKS_CURSOR_UP: case DIKS_CURSOR_DOWN: case DIKS_INFO:
+     case DIKS_CURSOR_UP: case DIKS_INFO:
           U.osd_until = U.osd_until > now ? 0 : now + 8;
           U.dirty = 1;
           break;
@@ -1535,10 +1653,95 @@ static void draw_cards(struct canvas *c)
      }
 }
 
+/* a subtitle line in runs: music notes (U+2669..U+266F, missing from Noto
+ * Sans) in the symbols font, the rest in f_bold. Width only if !draw. */
+static int is_note(const unsigned char *p)
+{
+     return p[0] == 0xe2 && p[1] == 0x99 && p[2] >= 0xa9 && p[2] <= 0xaf;
+}
+
+static int cue_runs(const char *line, int x, int y, int h, int draw)
+{
+     IDirectFBFont *fb = U.h.f_bold, *fs = U.h.f_sym ? U.h.f_sym : U.h.f_bold;
+     int w = 0;
+     const unsigned char *p = (const unsigned char *)line;
+     while (*p) {
+          int note = is_note(p);
+          const unsigned char *q = p;
+          while (*q && is_note(q) == note) q += note ? 3 : 1;
+          char run[512];
+          size_t n = (size_t)(q - p) < sizeof run - 1 ? (size_t)(q - p) : sizeof run - 1;
+          memcpy(run, p, n);
+          run[n] = 0;
+          IDirectFBFont *f = note ? fs : fb;
+          int rw = (int)n * 20;
+          if (f) f->GetStringWidth(f, run, -1, &rw);
+          if (draw) text(f, x + w, y, h, 0xffffffff, run, -1);
+          w += rw;
+          p = q;
+     }
+     return w;
+}
+
+/* a cue: each line centred on a dark box, bottom of the screen (above the
+ * OSD when that is up) */
+static void draw_cue(struct canvas *c, const struct jf_cue *cue, int osd)
+{
+     int W = U.h.W, H = U.h.H;
+     const char *lines[4];
+     int nl = 0, lh = 56;
+     char buf[1024];
+     snprintf(buf, sizeof buf, "%s", cue->text);
+     for (char *p = buf; p && nl < 4; ) {
+          lines[nl++] = p;
+          char *e = strchr(p, '\n');
+          if (e) { *e = 0; p = e + 1; } else p = NULL;
+     }
+     int y = (osd ? H - 330 : H - 110) - nl * lh;
+     for (int i = 0; i < nl; i++, y += lh) {
+          int tw = cue_runs(lines[i], 0, 0, 0, 0);
+          if (tw > W - 200) tw = W - 200;
+          if (c) gfx_rrect(c, (W - tw) / 2 - 20, y + 2, tw + 40, lh - 4, 10, 0xb0000000);
+          else cue_runs(lines[i], (W - tw) / 2, y, lh, 1);
+     }
+}
+
+static void draw_menu(struct canvas *c)
+{
+     int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
+     int W = U.h.W, H = U.h.H, mw = 760, row = 72;
+     int show = n > 9 ? 9 : n, top = U.menu_sel >= show ? U.menu_sel - show + 1 : 0;
+     int mh = 150 + show * row + 110, x = W - 40 - mw, y = (H - mh) / 2;
+     U.h.sheet(U.h.ctx, c, x, y, mw, mh, "Subtitles");
+     for (int i = top; i < top + show; i++) {
+          int ry = y + 130 + (i - top) * row;
+          const struct jf_stream *st = idx[i] >= 0 ? stream_of(idx[i]) : NULL;
+          if (c) {
+               if (i == U.menu_sel) U.h.focus(c, x + 24, ry, mw - 48, row - 8, 18);
+          } else {
+               char t[160];
+               if (!st) snprintf(t, sizeof t, "Off");
+               else snprintf(t, sizeof t, "%s", st->title[0] ? st->title : st->lang[0] ? st->lang : "Track");
+               uint32_t col = st && !st->is_text ? K_TEXT3 : K_TEXT;
+               char ft[180];
+               fit(U.h.f_item, t, mw - 160, ft, sizeof ft);
+               text(U.h.f_item, x + 56, ry, row - 8, col, ft, -1);
+               if (idx[i] == U.sub_index) text(U.h.f_small, x + mw - 56, ry, row - 8, K_ACCENT_L, "On", 1);
+          }
+     }
+     static const char *const h[] = { "OK", "Choose", "BACK", "Close" };
+     U.h.hints(U.h.ctx, c, x + mw / 2, y + mh - 80, h, 2);
+}
+
 static void draw_player(struct canvas *c, double now)
 {
-     /* nothing but the OSD: the video is on the plane below */
-     if (!(U.osd_until > now || U.pstate != 1 || U.seek_pending)) return;
+     /* the video is on the plane below: only the cue, the menu, the OSD */
+     int osd = U.osd_until > now || U.pstate != 1 || U.seek_pending;
+     if (U.pstate != 0) {
+          if (U.cue_shown && !U.menu_on) draw_cue(c, U.cue_shown, osd);
+          if (U.menu_on) { draw_menu(c); return; }
+     }
+     if (!osd) return;
      int W = U.h.W, H = U.h.H;
      int bx = 120, bw = W - 240, by = H - 200;
      double pos = U.seek_pending ? U.seek_target_ms : U.pos_ms;
@@ -1568,7 +1771,7 @@ static void draw_player(struct canvas *c, double now)
      } else {
           char t[200], a[32], b[32];
           if (U.playing.type == JF_EPISODE && U.playing.series_name[0])
-               snprintf(t, sizeof t, "%s  \xc2\xb7  S%d E%d  %s", U.playing.series_name,
+               snprintf(t, sizeof t, "%s  \xc2\xb7  S%d:E%d - %s", U.playing.series_name,
                         U.playing.season, U.playing.episode, U.playing.name);
           else snprintf(t, sizeof t, "%s", U.playing.name);
           text(U.h.f_head, bx, H - 280, 60, K_TEXT, t, -1);
@@ -1579,12 +1782,12 @@ static void draw_player(struct canvas *c, double now)
           fmt_clock(U.dur_ms, b, sizeof b);
           text(U.h.f_small, bx, by + 20, 40, K_TEXT2, a, -1);
           text(U.h.f_small, bx + bw, by + 20, 40, K_TEXT2, b, 1);
-          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "BACK", "Stop" };
-          U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 3);
+          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "Subtitles", "BACK", "Stop" };
+          U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 4);
      }
      if (c) {
-          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "BACK", "Stop" };
-          U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 3);
+          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "Subtitles", "BACK", "Stop" };
+          U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 4);
      }
 }
 
