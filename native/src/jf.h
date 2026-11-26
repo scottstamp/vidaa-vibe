@@ -58,6 +58,9 @@ struct jf_item {
      char backdrop_tag[JF_ID];/* BackdropImageTags[0] */
      char parent_backdrop_id[JF_ID];
      char parent_backdrop_tag[JF_ID];
+     char parent_thumb_id[JF_ID];   /* ParentThumbItemId: the series, for episodes */
+     char parent_thumb_tag[JF_ID];  /* ParentThumbImageTag */
+     char series_primary_tag[JF_ID];/* SeriesPrimaryImageTag (poster of the series) */
      float aspect;            /* PrimaryImageAspectRatio; 0 if unknown */
      char *overview;          /* malloc'd or NULL: jf_items_free */
 };

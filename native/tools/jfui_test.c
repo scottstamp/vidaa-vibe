@@ -7,6 +7,9 @@
  * STEP: up down left right ok back  - a key
  *       wait:S                      - run S seconds (results, polls)
  * Never run a step that starts playback unless the owner is watching.
+ * Signing out is refused here (JFUI_TEST): it revokes the token on the
+ * server, and a test runs with a copy of the UI's session (2026-11-26 it
+ * did, and the owner had to sign in again).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +61,7 @@ int main(int argc, char **argv)
           { "right", DIKS_CURSOR_RIGHT }, { "ok", DIKS_OK }, { "back", DIKS_BACK },
      };
      setvbuf(stdout, NULL, _IOLBF, 0);
+     setenv("JFUI_TEST", "1", 1);     /* the panel refuses to sign out (revokes the UI's token) */
      cv.w = 1920; cv.h = 1080; cv.pitch = 1920;
      cv.px = calloc((size_t)cv.w * cv.h, 4);
      struct jfui_host h = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1920, 1080, NULL,

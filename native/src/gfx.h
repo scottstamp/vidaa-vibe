@@ -45,4 +45,9 @@ void gfx_shadow(struct canvas *c, int x, int y, int w, int h, int r, int spread,
 /* rounded-rectangle outline of width t */
 void gfx_rrect_outline(struct canvas *c, int x, int y, int w, int h, int r, int t, uint32_t colour);
 
+/* an ARGB image of exactly w x h (src_pitch in pixels), rounded corners of
+ * radius r, blended over at alpha 0..255 */
+void gfx_image(struct canvas *c, int x, int y, int w, int h, int r,
+               const uint32_t *src, int src_pitch, int alpha);
+
 #endif

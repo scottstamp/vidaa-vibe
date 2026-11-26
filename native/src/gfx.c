@@ -135,6 +135,30 @@ static void rrect_impl(struct canvas *c, int x, int y, int w, int h, int r,
      }
 }
 
+void gfx_image(struct canvas *c, int x, int y, int w, int h, int r,
+               const uint32_t *src, int src_pitch, int alpha)
+{
+     if (w <= 0 || h <= 0 || !src || alpha <= 0)
+          return;
+     if (r * 2 > w) r = w / 2;
+     if (r * 2 > h) r = h / 2;
+     int x0, y0, x1, y1;
+     if (!bounds(c, x, y, w, h, &x0, &y0, &x1, &y1))
+          return;
+     for (int py = y0; py < y1; py++) {
+          uint32_t *row = c->px + (size_t)py * c->pitch;
+          const uint32_t *s = src + (size_t)(py - y) * src_pitch - x;
+          int in_corner_band = py < y + r || py >= y + h - r;
+          for (int px = x0; px < x1; px++) {
+               int cov = alpha;
+               if (in_corner_band && (px < x + r || px >= x + w - r))
+                    cov = coverage(px, py, x, y, w, h, r) * alpha / 255;
+               if (cov >= 255 && (s[px] >> 24) == 0xff) row[px] = s[px];
+               else if (cov) over(&row[px], s[px], cov);
+          }
+     }
+}
+
 void gfx_rrect(struct canvas *c, int x, int y, int w, int h, int r, uint32_t colour)
 {
      rrect_impl(c, x, y, w, h, r, colour, colour, 0);

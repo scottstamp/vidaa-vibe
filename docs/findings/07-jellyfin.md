@@ -424,3 +424,28 @@ main window) with no manual step.
   to 300000). Before the decoders opened it was 0, which the earlier
   "returns 0" note was about. vibe-play now re-bases its clock on it every
   second.
+
+### Card screens (2026-11-26), and a lesson
+
+Home is now laid out like the Jellyfin web client (owner's request, with
+a screenshot): shelves "My Media", "Continue Watching" and "Next Up" of
+16:9 cards that scroll sideways, then "Account" (Sign out). Libraries are a
+grid of 2:3 posters (films, series, seasons, collections) or 16:9 cards.
+Card images follow the web client's choice: Thumb, then the series' Thumb
+for episodes (`ParentThumbItemId`/`ParentThumbImageTag`), then Primary,
+then a backdrop. `jfimg.c` fetches them on its own thread, newest request
+first, decodes with stb_image and caches up to 48 images / 24 MB.
+
+Two traps found on the way:
+- **Thread-locals break the binaries.** With zig, a `__thread` variable
+  (stb_image has them by default) adds `NEEDED ld-linux-armhf.so.3`
+  (`__tls_get_addr`). The TV only has `/lib/ld-linux.so.3`, so the binary
+  does not start at all: vibe-ui would have looped in boot.sh. Fixed with
+  `STBI_NO_THREAD_LOCALS`, and `build.sh` now fails if any binary needs
+  that library. Found by `jfui_test` failing to start on the TV, before any
+  deploy.
+- **Signing out from a test revoked the UI's token.** `jfui_test` runs with
+  a copy of the UI's session file, and Sign out calls the server's logout,
+  which invalidates that token for every copy (`/UserViews` then answered
+  HTTP 401). The owner had to sign in again. The panel now refuses to sign
+  out when `JFUI_TEST` is set, and jfui_test sets it.

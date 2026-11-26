@@ -31,7 +31,7 @@
 #define ITEM_FIELDS "PrimaryImageAspectRatio,Overview,ChildCount,ParentId,SeriesPrimaryImage"
 
 /* not thread-local: TLS made zig link ld-linux-armhf.so.3, which the TV lacks */
-static char err_text[256];
+static char err_text[256];   /* shared with the image fetcher: only ever a message, a race garbles text at worst */
 
 const char *jf_error(void) { return err_text; }
 
@@ -366,6 +366,9 @@ static void parse_item(const cJSON *o, struct jf_item *it)
      const cJSON *pbd = cJSON_GetObjectItemCaseSensitive(o, "ParentBackdropImageTags");
      if (cJSON_IsArray(pbd) && cJSON_GetArraySize(pbd) > 0 && cJSON_IsString(pbd->child))
           COPY(it->parent_backdrop_tag, pbd->child->valuestring);
+     COPY(it->parent_thumb_id, jstr(o, "ParentThumbItemId"));
+     COPY(it->parent_thumb_tag, jstr(o, "ParentThumbImageTag"));
+     COPY(it->series_primary_tag, jstr(o, "SeriesPrimaryImageTag"));
      const char *ov = jstr(o, "Overview");
      it->overview = ov[0] ? strdup(ov) : NULL;
 }

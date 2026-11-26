@@ -1,6 +1,10 @@
 /*
- * The Jellyfin panel (see jfui.h). Text-only lists for now: posters come
- * later (stb_image is vendored for that).
+ * The Jellyfin panel (see jfui.h).
+ *
+ * Home and the lists are card screens laid out like Jellyfin's web client:
+ * Home is shelves (My Media, Continue Watching, Next Up), each a row of
+ * 16:9 cards that scrolls sideways; a list is a grid of posters (films,
+ * series, seasons) or 16:9 cards (episodes, folders). Images: jfimg.c.
  *
  * Screens: SERVERS (pick one of the discovered servers) -> SIGNIN (Quick
  * Connect code) -> HOME (continue watching, next up, libraries) -> LIST
@@ -11,6 +15,7 @@
 #include "jfui.h"
 #include "jf.h"
 #include "biz.h"
+#include "jfimg.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -148,6 +153,7 @@ static void *worker(void *arg)
                          t.token[0] = t.user_id[0] = t.user_name[0] = 0;
                     S = t;
                     jf_session_save(&S, STATE_FILE);
+                    jfimg_session(&S);
                }
                break;
           }
@@ -159,7 +165,7 @@ static void *worker(void *arg)
                int p = jf_qc_poll(&S, j.arg);
                if (p == 1) {
                     r->rc = jf_qc_finish(&S, j.arg);
-                    if (r->rc == 0) jf_session_save(&S, STATE_FILE);
+                    if (r->rc == 0) { jf_session_save(&S, STATE_FILE); jfimg_session(&S); }
                     r->start = 1;           /* signed in */
                } else {
                     r->rc = p < 0 ? -1 : 0;
@@ -199,6 +205,7 @@ static void *worker(void *arg)
           case JB_LOGOUT:
                jf_logout(&S);
                jf_session_save(&S, STATE_FILE);
+               jfimg_session(&S);
                r->rc = 0;
                break;
           }
@@ -264,6 +271,18 @@ static struct {
      struct row rows[MAX_ROWS];  /* the current screen's rows */
      int  nrows, sel, top;
      int  home_sel;              /* kept across trips into lists */
+
+     /* card screens (HOME, LIST): shelves of cards */
+     struct shelf {
+          int  kind;              /* SH_* */
+          const char *title;
+          struct jf_item *items;
+          int  n, land, grid;     /* 16:9 cards (else 2:3 posters); a wrapping grid */
+          int  sel, scroll;       /* focused card; first card shown (rows) */
+     } sh[4];
+     int  nsh, cur, vtop;        /* shelves, the focused one, the first shown
+                                  * (grid: the first line shown) */
+     int  hsel[4], hscroll[4], hcur, hvtop;   /* Home's, kept by SH_* kind */
 
      /* playback */
      pid_t pid;
@@ -389,9 +408,131 @@ static int first_selectable(int from, int dir)
      return -1;
 }
 
+/* ------------------------------------------------------------ card screens */
+
+enum { SH_MEDIA, SH_RESUME, SH_NEXT, SH_ACCOUNT };
+
+/* geometry, UI pixels (1920x1080) */
+#define C_X0     96                 /* left edge of the cards */
+#define C_TOP    170                /* below the title */
+#define C_BOT    (1080 - 120)       /* above the key hints */
+#define L_W      352                /* 16:9 card */
+#define L_H      198
+#define P_W      232                /* 2:3 poster */
+#define P_H      348
+#define C_GAP    32
+#define C_RAD    14
+#define SH_TITLE 64                 /* a shelf's title above its cards */
+#define C_TEXT   78                 /* two lines under a card */
+#define SH_GAP   24
+
+static int card_w(const struct shelf *h) { return h->land ? L_W : P_W; }
+static int card_h(const struct shelf *h) { return h->land ? L_H : P_H; }
+static int per_line(const struct shelf *h)
+{
+     return (1920 - 2 * C_X0 + C_GAP) / (card_w(h) + C_GAP);
+}
+static int shelf_h(const struct shelf *h) { return SH_TITLE + card_h(h) + C_TEXT + SH_GAP; }
+static int grid_line_h(const struct shelf *h) { return card_h(h) + C_TEXT + 16; }
+static int grid_lines_shown(const struct shelf *h)
+{
+     int n = (C_BOT - C_TOP) / grid_line_h(h);
+     return n < 1 ? 1 : n;
+}
+
+/* keep the focus in view: rows scroll sideways, Home and grids up/down */
+static void cards_follow(void)
+{
+     if (!U.nsh) return;
+     struct shelf *h = &U.sh[U.cur];
+     if (h->grid) {
+          int pl = per_line(h), line = h->sel / pl, shown = grid_lines_shown(h);
+          if (line < U.vtop) U.vtop = line;
+          if (line >= U.vtop + shown) U.vtop = line - shown + 1;
+          return;
+     }
+     int full = per_line(h);
+     if (h->sel < h->scroll) h->scroll = h->sel;
+     if (h->sel >= h->scroll + full) h->scroll = h->sel - full + 1;
+     if (U.cur < U.vtop) U.vtop = U.cur;
+     for (;;) {                           /* shelves vtop..cur must fit */
+          int y = C_TOP;
+          for (int i = U.vtop; i <= U.cur; i++) y += shelf_h(&U.sh[i]);
+          if (y - SH_GAP <= C_BOT || U.vtop >= U.cur) break;
+          U.vtop++;
+     }
+}
+
+/* a list's cards: posters for films, series, seasons, collections */
+static int poster_type(enum jf_type t)
+{
+     return t == JF_MOVIE || t == JF_SERIES || t == JF_SEASON || t == JF_BOXSET;
+}
+
+static int card_screen(void) { return U.scr == J_HOME || U.scr == J_LIST; }
+
+static void add_shelf(int kind, const char *title, struct jf_item *items, int n, int land, int grid)
+{
+     if (U.nsh >= 4) return;
+     U.sh[U.nsh++] = (struct shelf){ kind, title, items, n, land, grid, 0, 0 };
+}
+
+static void build_cards(void)
+{
+     U.nsh = 0;
+     if (U.scr == J_HOME) {
+          if (U.home[2].n) add_shelf(SH_MEDIA, "My Media", U.home[2].items, U.home[2].n, 1, 0);
+          if (U.home[0].n) add_shelf(SH_RESUME, "Continue Watching", U.home[0].items, U.home[0].n, 1, 0);
+          if (U.home[1].n) add_shelf(SH_NEXT, "Next Up", U.home[1].items, U.home[1].n, 1, 0);
+          add_shelf(SH_ACCOUNT, "Account", NULL, 1, 1, 0);       /* one card: Sign out */
+          U.cur = 0;
+          for (int i = 0; i < U.nsh; i++) {
+               struct shelf *h = &U.sh[i];
+               h->sel = U.hsel[h->kind];
+               h->scroll = U.hscroll[h->kind];
+               if (h->sel >= h->n) h->sel = h->n - 1;
+               if (h->sel < 0) h->sel = 0;
+               if (h->scroll > h->sel) h->scroll = h->sel;
+               if (h->kind == U.hcur) U.cur = i;
+          }
+          U.vtop = U.hvtop < U.nsh ? U.hvtop : 0;
+     } else if (U.scr == J_LIST) {
+          struct level *L = &U.lv[U.depth - 1];
+          int posters = L->l.n > 0 && poster_type(L->l.items[0].type);
+          add_shelf(0, NULL, L->l.items, L->l.n, !posters, 1);
+          U.sh[0].sel = L->sel < L->l.n ? L->sel : 0;
+          U.cur = 0;
+          U.vtop = L->top;
+     }
+}
+
+/* where the focus is, kept for when the screen comes back */
+static void save_cards(void)
+{
+     if (U.scr == J_HOME) {
+          for (int i = 0; i < U.nsh; i++) {
+               U.hsel[U.sh[i].kind] = U.sh[i].sel;
+               U.hscroll[U.sh[i].kind] = U.sh[i].scroll;
+          }
+          if (U.nsh) U.hcur = U.sh[U.cur].kind;
+          U.hvtop = U.vtop;
+     } else if (U.scr == J_LIST && U.depth > 0 && U.nsh) {
+          U.lv[U.depth - 1].sel = U.sh[0].sel;
+          U.lv[U.depth - 1].top = U.vtop;
+     }
+}
+
+static struct jf_item *focused_item(void)
+{
+     if (!card_screen() || U.cur >= U.nsh) return NULL;
+     struct shelf *h = &U.sh[U.cur];
+     return h->items && h->sel >= 0 && h->sel < h->n ? &h->items[h->sel] : NULL;
+}
+
 static void build_rows(void)
 {
      U.nrows = 0;
+     if (card_screen()) { build_cards(); return; }
      switch (U.scr) {
      case J_SERVERS:
           for (int i = 0; i < U.nservers; i++) add_row(0, U.servers[i].name, NULL, i);
@@ -725,6 +866,7 @@ void jfui_open(const struct jfui_host *h, double now)
           U.to_fd = U.from_fd = -1;
           jf_session_load(&S, STATE_FILE);
           jf_session_init(&S);
+          jfimg_session(&S);
           snprintf(U.server_name, sizeof U.server_name, "%s", S.server_name);
           snprintf(U.user_name, sizeof U.user_name, "%s", S.user_name);
           U.have_server = S.server[0] != 0;
@@ -824,15 +966,18 @@ static void apply(struct result *r, double now)
           }
           break;
      case JB_HOME:
+          /* a reload keeps the focus; the first load (only the Account
+           * shelf was there) starts at the top */
+          if (U.scr == J_HOME && (U.home[0].n || U.home[1].n || U.home[2].n)) save_cards();
+          else if (!(U.home[0].n || U.home[1].n || U.home[2].n)) { U.hcur = SH_MEDIA; U.hvtop = 0; }
           for (int s = 0; s < 3; s++) { jf_list_free(&U.home[s]); U.home[s] = r->lists[s]; r->lists[s] = (struct jf_list){ 0 }; }
-          if (U.scr == J_HOME) { int s = U.sel; go(J_HOME, s); }
+          if (U.scr == J_HOME) go(J_HOME, 0);
           break;
      case JB_LIST: {
           struct level *L;
           if (r->start == 0 && (U.scr != J_LIST || !U.lv[U.depth - 1].loading_more)) {
                /* a new level (or a reload of the top one) */
-               if (U.scr != J_LIST) U.home_sel = U.scr == J_HOME ? U.sel : U.home_sel;
-               else U.lv[U.depth - 1].sel = U.sel, U.lv[U.depth - 1].top = U.top;
+               save_cards();
                L = &U.lv[U.depth];
                jf_list_free(&L->l);
                L->l = r->lists[0];
@@ -852,9 +997,8 @@ static void apply(struct result *r, double now)
                     free(m->items);       /* overviews moved, not freed */
                     *m = (struct jf_list){ 0 };
                }
-               int s = U.sel, t = U.top;
+               save_cards();
                build_rows();
-               U.sel = s; U.top = t;
           }
           break;
      }
@@ -864,8 +1008,7 @@ static void apply(struct result *r, double now)
           r->item.overview = NULL;
           U.have_detail = 1;
           if (U.scr != J_DETAIL) {
-               if (U.scr == J_LIST) { U.lv[U.depth - 1].sel = U.sel; U.lv[U.depth - 1].top = U.top; }
-               else if (U.scr == J_HOME) U.home_sel = U.sel;
+               save_cards();
                U.detail_back = U.scr;
                go(J_DETAIL, 0);
           } else {
@@ -961,6 +1104,7 @@ int jfui_tick(double now)
           else if (U.osd_until > now && now >= U.next_redraw) { U.next_redraw = now + 1; U.dirty = 1; }
      }
      if (U.err_until && now >= U.err_until) { U.err_until = 0; U.dirty = 1; }
+     if (jfimg_changed() && card_screen()) U.dirty = 1;
      int d = U.dirty;
      U.dirty = 0;
      return d && U.on;
@@ -1052,9 +1196,72 @@ static void key_player(int k, int repeat, double now)
      }
 }
 
+/* a list near its loaded end: the next page */
+static void more_if_needed(void)
+{
+     if (U.scr != J_LIST || !U.nsh) return;
+     struct level *L = &U.lv[U.depth - 1];
+     struct shelf *h = &U.sh[0];
+     if (L->lkind == LK_CHILDREN && !L->loading_more && L->l.n < L->l.total &&
+         h->sel >= L->l.n - 3 * per_line(h)) {
+          L->loading_more = 1;
+          struct job j = { .kind = JB_LIST, .lkind = LK_CHILDREN, .start = L->l.n };
+          snprintf(j.id, sizeof j.id, "%s", L->id);
+          j.gen = U.gen;
+          post(j);
+     }
+}
+
+static int card_key(int k, int repeat, double now)
+{
+     if (!U.nsh) return k == DIKS_BACK || k == DIKS_EXIT ? key_back(now) : 1;
+     struct shelf *h = &U.sh[U.cur];
+     int step = 0;
+     switch (k) {
+     case DIKS_CURSOR_LEFT:  if (h->sel > 0) h->sel--; break;
+     case DIKS_CURSOR_RIGHT: if (h->sel < h->n - 1) h->sel++; break;
+     case DIKS_CURSOR_UP:    step = -1; break;
+     case DIKS_CURSOR_DOWN:  step = 1; break;
+     case DIKS_PAGE_UP:      step = -3; break;
+     case DIKS_PAGE_DOWN:    step = 3; break;
+     case DIKS_BACK: case DIKS_EXIT:
+          if (repeat) return 1;
+          return key_back(now);
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: case DIKS_PLAY: case DIKS_PLAYPAUSE:
+          if (repeat || U.busy) return 1;
+          if (h->kind == SH_ACCOUNT && !h->items) {
+               /* signing out revokes the token on the server, and a test
+                * runs with a copy of the UI's session: never from a test */
+               if (getenv("JFUI_TEST")) { set_err("sign-out is off in tests", now); return 1; }
+               struct job j = { .kind = JB_LOGOUT };
+               post_browse(j, "Signing out…");
+          } else if (h->items && h->sel < h->n) {
+               save_cards();
+               open_item(&h->items[h->sel]);
+          }
+          return 1;
+     default:
+          return 1;
+     }
+     if (step && h->grid) {
+          int pl = per_line(h), t = h->sel + step * pl;
+          if (t < 0) t = step < 0 && h->sel >= pl ? h->sel % pl : 0;
+          if (t > h->n - 1) t = (h->sel / pl + 1) * pl < h->n ? h->n - 1 : h->sel;
+          h->sel = t;
+     } else if (step) {
+          int c = U.cur + (step < 0 ? -1 : 1);
+          if (c >= 0 && c < U.nsh) U.cur = c;
+     }
+     cards_follow();
+     more_if_needed();
+     U.dirty = 1;
+     return 1;
+}
+
 int jfui_key(int k, int repeat, double now)
 {
      if (U.scr == J_PLAYER) { key_player(k, repeat, now); return 1; }
+     if (card_screen()) return card_key(k, repeat, now);
      switch (k) {
      case DIKS_CURSOR_UP:   move(-1); return 1;
      case DIKS_CURSOR_DOWN: move(1); return 1;
@@ -1173,6 +1380,145 @@ static void draw_rows(struct canvas *c, int y0, int y1)
      }
 }
 
+/* the image a card shows, as Jellyfin's web client picks it: 16:9 cards
+ * prefer a Thumb (for episodes the series' Thumb), then the item's own
+ * Primary (an episode still, a library tile), then a backdrop; posters are
+ * the Primary (a season without one: the series') */
+static int card_image(const struct jf_item *it, int land, const char **id, const char **kind, const char **tag)
+{
+     *kind = "Primary"; *id = it->id; *tag = it->primary_tag;
+     if (!land) {
+          if (it->primary_tag[0]) return 1;
+          if (it->series_id[0] && it->series_primary_tag[0]) { *id = it->series_id; *tag = it->series_primary_tag; return 1; }
+          return 0;
+     }
+     if (it->type == JF_VIEW) return it->primary_tag[0] != 0;
+     if (it->thumb_tag[0]) { *kind = "Thumb"; *tag = it->thumb_tag; return 1; }
+     if (it->type == JF_EPISODE && it->parent_thumb_id[0] && it->parent_thumb_tag[0]) {
+          *kind = "Thumb"; *id = it->parent_thumb_id; *tag = it->parent_thumb_tag; return 1;
+     }
+     if (it->type != JF_MOVIE && it->type != JF_SERIES && it->primary_tag[0]) return 1;
+     if (it->backdrop_tag[0]) { *kind = "Backdrop"; *tag = it->backdrop_tag; return 1; }
+     if (it->parent_backdrop_id[0] && it->parent_backdrop_tag[0]) {
+          *kind = "Backdrop"; *id = it->parent_backdrop_id; *tag = it->parent_backdrop_tag; return 1;
+     }
+     return it->primary_tag[0] != 0;
+}
+
+/* s cut to maxw pixels with an ellipsis (no font: a rough estimate) */
+static void fit(IDirectFBFont *f, const char *s, int maxw, char *out, size_t n)
+{
+     snprintf(out, n, "%s", s);
+     size_t len = strlen(out);
+     for (;;) {
+          int w = (int)len * 15;
+          if (f) f->GetStringWidth(f, out, -1, &w);
+          if (w <= maxw || len == 0 || n < 8) return;
+          do len--; while (len > 0 && ((unsigned char)out[len] & 0xc0) == 0x80);
+          while (len > 0 && out[len - 1] == ' ') len--;
+          if (len + 4 > n) len = n - 4;
+          memcpy(out + len, "\xe2\x80\xa6", 4);   /* the ellipsis and the NUL */
+     }
+}
+
+/* the two lines under a card, as the web client words them */
+static void card_lines(const struct jf_item *it, char *t, size_t tn, char *sub, size_t sn)
+{
+     sub[0] = 0;
+     if (it->type == JF_EPISODE && it->series_name[0]) {
+          snprintf(t, tn, "%s", it->series_name);
+          if (it->season >= 0 && it->episode >= 0)
+               snprintf(sub, sn, "S%d:E%d - %s", it->season, it->episode, it->name);
+          else snprintf(sub, sn, "%s", it->name);
+          return;
+     }
+     snprintf(t, tn, "%s", it->name);
+     if (it->type == JF_VIEW) return;
+     if (it->type == JF_MOVIE || it->type == JF_VIDEO) {
+          if (it->year) snprintf(sub, sn, "%d", it->year);
+          return;
+     }
+     item_sub(it, sub, sn);
+}
+
+static void draw_card(struct canvas *c, const struct shelf *h, int i, int x, int y, int foc)
+{
+     int w = card_w(h), ch = card_h(h);
+     const struct jf_item *it = h->items ? &h->items[i] : NULL;
+     const char *id, *kind, *tag;
+     const struct jfimg *img = NULL;
+     if (it && card_image(it, h->land, &id, &kind, &tag)) img = jfimg_get(id, kind, tag, w, ch);
+     if (c) {
+          if (foc) gfx_rrect(c, x - 8, y - 8, w + 16, ch + 16, C_RAD + 8, 0xffffffff);
+          if (img) gfx_image(c, x, y, w, ch, C_RAD, img->px, img->w, 255);
+          else {
+               gfx_rrect(c, x, y, w, ch, C_RAD, 0xff1c2130);
+               gfx_rrect_outline(c, x, y, w, ch, C_RAD, 1, K_PANEL_EDGE);
+          }
+          if (it && it->position_ticks > 0 && it->runtime_ticks > 0) {
+               int pw = (int)((int64_t)(w - 20) * it->position_ticks / it->runtime_ticks);
+               if (pw > w - 20) pw = w - 20;
+               gfx_rrect(c, x + 10, y + ch - 16, w - 20, 6, 3, 0xa0000000);
+               if (pw >= 6) gfx_rrect_hgrad(c, x + 10, y + ch - 16, pw, 6, 3, K_ACCENT_L, K_ACCENT_R);
+          } else if (it && it->played && it->type != JF_VIEW) {
+               gfx_rrect(c, x + w - 44, y + 10, 34, 34, 17, 0xe04f7cff);   /* watched */
+          }
+          return;
+     }
+     char t[160], sub[200], ft[200];
+     if (!it) {                                   /* the Sign out card */
+          text(U.h.f_item, x + w / 2, y + ch / 2 - 24, 48, K_TEXT, "Sign out", 0);
+          return;
+     }
+     card_lines(it, t, sizeof t, sub, sizeof sub);
+     if (!img) {                                  /* no picture (yet): the name on the card */
+          fit(U.h.f_item, it->name, w - 32, ft, sizeof ft);
+          text(U.h.f_item, x + w / 2, y + ch / 2 - 24, 48, K_TEXT2, ft, 0);
+     }
+     fit(U.h.f_small, t, w + 8, ft, sizeof ft);
+     text(U.h.f_small, x + w / 2, y + ch + 8, 36, foc ? 0xffffffff : K_TEXT, ft, 0);
+     if (sub[0]) {
+          fit(U.h.f_small, sub, w + 8, ft, sizeof ft);
+          text(U.h.f_small, x + w / 2, y + ch + 42, 32, K_TEXT2, ft, 0);
+     }
+}
+
+static void draw_cards(struct canvas *c)
+{
+     if (!U.nsh) return;
+     cards_follow();
+     struct shelf *g = &U.sh[0];
+     if (g->grid) {
+          int pl = per_line(g), lh = grid_line_h(g), shown = grid_lines_shown(g);
+          for (int l = U.vtop; l < U.vtop + shown; l++)
+               for (int k = 0; k < pl; k++) {
+                    int i = l * pl + k;
+                    if (i >= g->n) break;
+                    draw_card(c, g, i, C_X0 + k * (card_w(g) + C_GAP), C_TOP + (l - U.vtop) * lh, i == g->sel);
+               }
+          if (!c && g->n > 0) {
+               char pos[32];
+               struct level *L = &U.lv[U.depth - 1];
+               snprintf(pos, sizeof pos, "%d / %d", g->sel + 1, L->l.total > g->n ? L->l.total : g->n);
+               text(U.h.f_small, 1920 - C_X0, 80, 80, K_TEXT3, pos, 1);
+          }
+          return;
+     }
+     int y = C_TOP;
+     for (int si = U.vtop; si < U.nsh; si++) {
+          struct shelf *h = &U.sh[si];
+          if (y + shelf_h(h) - SH_GAP > C_BOT + 40) break;
+          if (!c) text(U.h.f_bold, C_X0, y, SH_TITLE - 16, si == U.cur ? K_TEXT : K_TEXT2, h->title, -1);
+          int cy = y + SH_TITLE;
+          for (int i = h->scroll; i < h->n; i++) {
+               int x = C_X0 + (i - h->scroll) * (card_w(h) + C_GAP);
+               if (x >= 1920) break;
+               draw_card(c, h, i, x, cy, si == U.cur && i == h->sel);
+          }
+          y += shelf_h(h);
+     }
+}
+
 static void draw_player(struct canvas *c, double now)
 {
      /* nothing but the OSD: the video is on the plane below */
@@ -1283,7 +1629,8 @@ void jfui_draw(struct canvas *c, double now)
           }
           y0 = 480;
      }
-     draw_rows(c, y0, y1);
+     if (card_screen()) draw_cards(c);
+     else draw_rows(c, y0, y1);
      if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W - P_X, H - 150, 50, K_TEXT2, U.busy_msg, 1);
      if (!c && U.err_until > now) text(U.h.f_item, P_X, H - 150, 50, 0xffff8080, U.err, -1);
      static const char *const hs[] = { "ARROWS", "Move", "OK", "Select", "BACK", "Back" };
