@@ -131,7 +131,14 @@ facts but not the first's conclusion) agreed:
 - Risk: `usrfs`, `optfs`, `APP`, `LIB`, `MWLIB` are checked in Linux by
   `/bin/mtk_mount` (rootfs init, read in the recon log), not by MBOOT, so a
   bad one fails after boot, past MBOOT's slot fallback. SSH and Wi-Fi run
-  from `usrfs`. The only proven-good rescue payload is the factory image,
+  from `usrfs`. `mtk_mount` contains both `restart_on_corruption` and
+  `ignore_corruption`; the root line takes `$(ANDROID_VERITY_MODE)` and
+  the cmdline says `veritymode=enforcing`, so a corrupt block most likely
+  reboots the TV (a boot loop until re-flashed), not a soft failure
+  (inferred; which flag `mtk_mount` passes was not traced).
+- The file's trailing CRC-32 covers the whole file; a zlib CRC of the
+  script region alone does not match anything stored, so MBOOT's
+  `check_script_crc` uses something else (untraced). The only proven-good rescue payload is the factory image,
   which is destructive; the USB rescue itself is unexercised; no UART.
 - Value over the runtime approach is small: perhaps 1-2 s of boot,
   little RAM (about 900 MB already free), defence in depth. The one real
