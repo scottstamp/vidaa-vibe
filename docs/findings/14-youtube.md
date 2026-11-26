@@ -52,8 +52,36 @@ watching):
 | the same master cut down to the 1080p60 AVC variant only | plays |
 | another video's master cut down to **2160p60 VP9 Profile 2 HDR10** (`vp09.02.51.10…`, ~31 Mbit/s) | plays: tracks found, 27.6 s reached in a 40 s run (≈12 s to start); smoothness and HDR to be confirmed by eye. Its SDR 4K variant is ~77 Mbit/s (not tried) |
 
-So: **HMP cannot open YouTube's https URLs** (TLS; it plays Jellyfin's
-http fine), and **HMP plays YouTube's own HLS with separate audio**. The
+**Correction, same day: https was never the problem — DNS was.** curl's
+log (`VIBE_CURL_DEBUG=1` in `vibe-play`) said `Could not resolve:
+…googlevideo.com`. The TV's manual-IP settings (`network/cfg/manual-ip/`
+in `/var/local/kilby/loreg-kilby*.dat`, model keys
+`kilby.sl2.str.network.dns-server-1/-2`, which read back empty through
+the model) named the PC (192.168.2.154) as DNS 1, from the rooting work,
+where `tools/dns-pin.py` still ran: it answers NXDOMAIN for everything
+but `alvidaa.vidaahub.com`, and c-ares stops at NXDOMAIN instead of
+trying 1.1.1.1. Every host name on the TV failed (Jellyfin uses an IP).
+Fixed: `debloat.sh` keeps `/var/local/etc/resolv.conf` (nwksrv's file,
+rewritten in place) at `1.1.1.1 1.0.0.1` on every pass (switch
+`dns.off`; the original is in `/var/local/vibe/resolv.conf.orig`).
+After that, the googlevideo https URL plays directly in HMP.
+
+**TLS checking.** The TV's libcurl 7.77.0 (OpenSSL 1.0.2u) has no CA file
+compiled in; Hisense's `curlhttpsrc` (`gst-plugins-hisense`, properties
+`ssl-ca-file`, `ssl-strict`, env `SSL_VERIFY_DISABLED`) **turns peer
+verification off by itself**: with a CA file holding one unrelated
+certificate, https still played. `vibe-play` now exports
+`curl_multi_add_handle`/`curl_easy_perform` shims (`-rdynamic`; the plugin
+binds curl from the global scope) that set `CURLOPT_CAINFO`
+(`/var/local/vibe/cacert.pem` if present, else Hisense's Mozilla bundle
+`/opt/hisdk2.0/ca/cacert.pem`, 140 roots, 2023) plus `SSL_VERIFYPEER=1`,
+`SSL_VERIFYHOST=2` on every handle. Tested: wrong CA → `HMPStart 1`;
+the bundle → plays.
+
+So the helper is still needed (resolution with yt-dlp, SponsorBlock), but
+not necessarily as a video proxy: the TV can fetch googlevideo itself.
+**HMP plays YouTube's own HLS with separate audio** (tested through the
+proxy; direct HLS not yet). The
 helper therefore needs no ffmpeg: resolve with yt-dlp, serve the HLS
 master over http with every URI rewritten to go through the helper, and
 choose the variant by cutting the master. YouTube's URLs are bound to the

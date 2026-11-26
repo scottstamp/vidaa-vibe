@@ -261,6 +261,68 @@ static void on_event(hmp_t h, int ev, void *extra)
      }
 }
 
+/* ---- HTTPS ----------------------------------------------------------------
+ * The TV's libcurl (7.77.0, OpenSSL 1.0.2u) has no CA file compiled in and
+ * never calls SSL_CTX_set_default_verify_paths; Hisense's curlhttpsrc sets
+ * CURLOPT_CAINFO only from its "ssl-ca-file" property, which HMP never
+ * sets. So every https stream failed certificate verification (HMPStart
+ * error 1; findings 14). The plugin finds curl's functions in the global
+ * scope, and these definitions, exported from the executable (build.sh),
+ * come first: each gives the handle a CA bundle, then calls libcurl. */
+#define VP_CURLOPT_CAINFO 10065
+static const char *ca_file;
+static int (*curl_setopt_real)(void *, int, ...);
+static int (*curl_multi_add_real)(void *, void *);
+static int (*curl_perform_real)(void *);
+
+#define VP_CURLOPT_VERBOSE 41
+#define VP_CURLOPT_SSL_VERIFYPEER 64
+#define VP_CURLOPT_SSL_VERIFYHOST 81
+static int curl_debug;          /* VIBE_CURL_DEBUG set: curl's own log to stderr */
+
+/* Measured (findings 14): the plugin also turns certificate checking OFF
+ * by itself (a wrong CA file still played). Our settings run after its
+ * own, at the moment the handle is handed to curl, so they win: verify
+ * the peer and the host name against the CA file. */
+static void give_ca(void *easy)
+{
+     static int n;
+     if (ca_file && curl_setopt_real && easy) {
+          int r = curl_setopt_real(easy, VP_CURLOPT_CAINFO, ca_file);
+          r |= curl_setopt_real(easy, VP_CURLOPT_SSL_VERIFYPEER, 1L);
+          r |= curl_setopt_real(easy, VP_CURLOPT_SSL_VERIFYHOST, 2L);
+          if (curl_debug) curl_setopt_real(easy, VP_CURLOPT_VERBOSE, 1L);
+          if (n++ < 3) say("note curl handle: CA + verify set -> %d", r);
+     }
+}
+
+__attribute__((visibility("default"))) int curl_multi_add_handle(void *multi, void *easy)
+{
+     give_ca(easy);
+     return curl_multi_add_real ? curl_multi_add_real(multi, easy) : 1;
+}
+
+__attribute__((visibility("default"))) int curl_easy_perform(void *easy)
+{
+     give_ca(easy);
+     return curl_perform_real ? curl_perform_real(easy) : 1;
+}
+
+static void curl_hooks(void *lib)
+{
+     curl_setopt_real = (int (*)(void *, int, ...))dlsym(lib, "curl_easy_setopt");
+     curl_multi_add_real = (int (*)(void *, void *))dlsym(lib, "curl_multi_add_handle");
+     curl_perform_real = (int (*)(void *))dlsym(lib, "curl_easy_perform");
+     curl_debug = getenv("VIBE_CURL_DEBUG") != NULL;
+     static const char *const bundles[] = {
+          "/var/local/vibe/cacert.pem",       /* ours, if deployed */
+          "/opt/hisdk2.0/ca/cacert.pem",      /* Hisense's copy of Mozilla's */
+     };
+     for (size_t i = 0; i < sizeof bundles / sizeof bundles[0]; i++)
+          if (access(bundles[i], R_OK) == 0) { ca_file = bundles[i]; break; }
+     say("note ca %s", ca_file ? ca_file : "(none)");
+}
+
 static int load(void)
 {
      /* libhmplayer needs dfbrc_client_* without naming the library that has
@@ -272,11 +334,14 @@ static int load(void)
           /* libgsthsplayer (a GStreamer plugin) uses curl without linking it */
           "libcurl.so.4",
      };
-     for (size_t i = 0; i < sizeof pre / sizeof pre[0]; i++)
-          if (!dlopen(pre[i], RTLD_NOW | RTLD_GLOBAL)) {
+     for (size_t i = 0; i < sizeof pre / sizeof pre[0]; i++) {
+          void *h = dlopen(pre[i], RTLD_NOW | RTLD_GLOBAL);
+          if (!h) {
                say("error dlopen: %s", dlerror());
                return -1;
           }
+          if (!strcmp(pre[i], "libcurl.so.4")) curl_hooks(h);
+     }
      /* the vendor debug-log library needs its one-time init before any
       * library logs (libhmplayer does, in its static constructors) */
      void *dbg = dlopen("libcsp-debug.so", RTLD_NOW | RTLD_GLOBAL);

@@ -84,7 +84,10 @@ JF_SRC="src/jf.c src/jfsub.c src/http.c third_party/cjson/cJSON.c"
 # Jellyfin: command-line client (libcurl by dlopen)
 "$ZIG" cc $CFLAGS -o "$OUT/vibe-jf" src/vibe-jf.c $JF_SRC -ldl -lpthread $COMMON_LD
 # the player child (libhmplayer by dlopen; re-execs itself with the vendor library path)
-"$ZIG" cc $CFLAGS -o "$OUT/vibe-play" src/vibe-play.c src/biz.c src/common.c -ldl -lpthread $COMMON_LD
+# (exports its curl_multi_add_handle/curl_easy_perform: the CA-file shims
+# the vendor curl plugin must find before libcurl's; see vibe-play.c HTTPS)
+"$ZIG" cc $CFLAGS -o "$OUT/vibe-play" src/vibe-play.c src/biz.c src/common.c -ldl -lpthread \
+    -rdynamic $COMMON_LD
 # posts a named semaphore (boot: GUICLOSE ends the VIDAA animation early)
 "$ZIG" cc $CFLAGS -o "$OUT/vibe-sem" src/vibe-sem.c -lpthread $COMMON_LD
 # the Jellyfin panel without DirectFB, for tests over SSH (not deployed)

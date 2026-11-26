@@ -51,6 +51,7 @@ Ways back (all over SSH, each documented in 06-native-route.md):
 | `touch /var/local/vibe-stock` | at the next boot, `boot.sh` restores the original runtime file (md5-checked) and starts nothing; the stock UI is back from the boot after |
 | `HOOK_STEP=revert sh /var/local/vibe/hook-patch.sh` | takes our block out of the hook |
 | `touch /var/local/vibe/splash.stock` | the stock VIDAA boot animation again from the next boot (ours is `/var/local/vibe/splash`, bind-mounted by `early.sh`) |
+| `touch /var/local/vibe/dns.off` | `debloat.sh` stops forcing `/var/local/etc/resolv.conf` to 1.1.1.1/1.0.0.1; the TV's own (manual-IP) DNS returns at the next boot (original saved as `resolv.conf.orig`) |
 | `touch /var/local/vibe/jf.force-transcode` | test only: every Jellyfin play asks the server for its HLS conversion (remove it after) |
 
 ## Ground rules

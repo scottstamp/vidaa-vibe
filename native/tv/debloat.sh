@@ -77,6 +77,22 @@ BLOCK_UIDS="304 305 306 312 326 337 338 339 1032"
 
 off() { [ -f $V/debloat.off ]; }
 
+# DNS: the TV's manual-IP settings (network/cfg/manual-ip/dns1, from the
+# rooting work) name a PC that no longer answers DNS for general names, and
+# the network service writes them to resolv.conf at boot and on reconnects.
+# Each pass puts these servers back. Rewritten in place: the file belongs to
+# nwksrv. Switch: $V/dns.off (then the stock file returns at the next boot).
+DNS="1.1.1.1 1.0.0.1"
+RESOLV=/var/local/etc/resolv.conf
+dns_ensure() {
+    [ -f $V/dns.off ] && return
+    local want cur s
+    want=$(for s in $DNS; do echo "nameserver $s"; done)
+    cur=$(cat $RESOLV 2>/dev/null)
+    [ "$cur" = "$want" ] && return
+    echo "$want" > $RESOLV && echo "uptime $(up) resolv.conf set to: $DNS (was: $(echo $cur))"
+}
+
 NAT="iptables -t nat"
 DEAD_PORT=9     # nothing listens here: redirected traffic is refused at once
 
@@ -330,6 +346,7 @@ while :; do
     stop_pass
     ui_pass
     fw_ensure
+    dns_ensure
     u=$(up); u=${u%.*}
     # every 2 s while the late starters appear (the browser ~11 s, started
     # by systemserver, not app_man: the early overlay cannot stop it), then
