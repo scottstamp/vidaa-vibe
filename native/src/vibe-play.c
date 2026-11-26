@@ -335,12 +335,14 @@ static void *start_thread(void *arg)
           if (r == 0) {
                clock_set((double)start_ms, 1);
                /* HMP plays a moment from 0:00 before the seek lands; the UI
-                * covers the video until "state playing", so say it once the
-                * player's position has reached the start (at most 8 s) */
-               for (int i = 0; i < 80; i++) {
+                * covers the video until "state playing". Right after the
+                * seek GetPts already reports the target and stays on it while
+                * the player buffers (~10 s over the network), so wait until
+                * the position moves past it: playing from there (at most 20 s) */
+               for (int i = 0; i < 200; i++) {
                     struct hmp_pts pt;
                     memset(&pt, 0, sizeof pt);
-                    if (H.GetPts(player, &pt) == 0 && pt.pts + 2000 >= start_ms && pt.pts < start_ms + 60000) {
+                    if (H.GetPts(player, &pt) == 0 && pt.pts > start_ms + 200 && pt.pts < start_ms + 60000) {
                          say("note at %llu after %d ms", (unsigned long long)pt.pts, i * 100);
                          clock_set((double)pt.pts, 1);
                          break;

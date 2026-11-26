@@ -1543,11 +1543,11 @@ static void draw_player(struct canvas *c, double now)
           else {
                char t[200];
                if (U.playing.type == JF_EPISODE && U.playing.series_name[0])
-                    snprintf(t, sizeof t, "%s  Â·  S%d E%d  %s", U.playing.series_name,
+                    snprintf(t, sizeof t, "%s  ·  S%d E%d  %s", U.playing.series_name,
                              U.playing.season, U.playing.episode, U.playing.name);
                else snprintf(t, sizeof t, "%s", U.playing.name);
                text(U.h.f_head, W / 2, H / 2 - 90, 70, K_TEXT, t, 0);
-               text(U.h.f_item, W / 2, H / 2 + 10, 50, K_TEXT2, "Loadingâ¦", 0);
+               text(U.h.f_item, W / 2, H / 2 + 10, 50, K_TEXT2, "Loading…", 0);
           }
           return;
      }
