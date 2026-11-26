@@ -1288,6 +1288,9 @@ static void toast(struct app *a, const char *msg, double now)
  * signal, the stock no-signal standby). Both end in the same last minute. */
 enum { OFF_TIMER = 1, OFF_NOSIG = 2 };
 #define NOSIG_STANDBY_S (14 * 60)       /* stock, panel type 0; + the last minute */
+/* tests: /var/local/vibe/nosig.test makes it 1 minute (+ the last minute) */
+#define NOSIG_TEST_FILE "/var/local/vibe/nosig.test"
+static double nosig_wait(void) { return access(NOSIG_TEST_FILE, F_OK) == 0 ? 60.0 : NOSIG_STANDBY_S; }
 
 static void sleep_arm(struct app *a, int minutes, double now)
 {
@@ -2262,7 +2265,7 @@ int main(int argc, char **argv)
           if (a->sleep_kind == OFF_NOSIG && (!a->nosig_lost || jfui_playing()))
                sleep_cancel(a, "signal back", now, 0);
           else if (a->nosig_standby && a->nosig_lost && !a->sleep_deadline && !jfui_playing() &&
-                   now - a->nosig_since >= NOSIG_STANDBY_S)
+                   now - a->nosig_since >= nosig_wait())
                nosig_arm(a, now);
           /* an action row's "OK again" ran out: draw it plain again */
           if (a->confirm_until && now >= a->confirm_until) {
