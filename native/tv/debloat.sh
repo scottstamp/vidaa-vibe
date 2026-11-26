@@ -291,8 +291,36 @@ proc_watch() {
     done
 }
 
+# The stock browser (started by app_man at about 12 s) lived until about
+# 20 s: the main loop is busy in ui_pass (sleeps, reap) when it appears. A
+# browser process that draws a full-screen DirectFB surface in that window
+# and dies after the world's master is gone leaves the surface behind, and
+# vibe-ui can then allocate nothing (suspected cause of the 2026-11-26
+# incident, 05-traps.md). browser_watch kills it as soon as it appears:
+# a /proc scan every 0.5 s (0.16 s each, measured) up to 40 s of uptime;
+# the main passes cover anything later.
+BROWSER="run_browser.sh hisense_browser"
+browser_watch() {
+    local u pid
+    while :; do
+        for p in /proc/[0-9]*; do
+            pid=${p#/proc/}
+            name_of $pid
+            case " $BROWSER " in
+            *" $n "*) [ -n "$n" ] && kill -KILL $pid 2>/dev/null \
+                && echo "uptime $(up) browser watch: killed $n:$pid" ;;
+            esac
+        done
+        off && return
+        u=$(up); u=${u%.*}
+        [ "$u" -ge 40 ] && return
+        sleep 0.5
+    done
+}
+
 if off; then echo "debloat.off present, not running"; fw_remove; exit 0; fi
 proc_watch &
+browser_watch &
 # the filter-table chain of the first version, if a run left one
 while iptables -D OUTPUT -j VIBE_OUT 2>/dev/null; do :; done
 iptables -F VIBE_OUT 2>/dev/null; iptables -X VIBE_OUT 2>/dev/null
