@@ -24,7 +24,7 @@
  * usage: vibe-play [--user=UID:GID[:G,...]] [--uri-word=N] [--mime=TYPE]
  *                  [--mime-word=N] [--rect=X,Y,W,H,Z] [--app-type=N]
  *                  [--kind=N] [--no-start-seek] [--probe]
- *                  [--av-request] [--media-status] [--no-aout-init]
+ *                  [--av-request] [--media-status] [--dmp-path] [--no-aout-init]
  * --probe: load the library and resolve the symbols, then exit (no player
  * is made, nothing shows)
  */
@@ -105,7 +105,8 @@ static void say(const char *fmt, ...)
 /* ---- state -------------------------------------------------------------- */
 
 static hmp_t player;
-static int av_request, media_status, model_ok = -1;
+static int av_request, media_status, dmp_path, model_ok = -1;
+static char prev_input[64];
 static int aout_init = 1, data_type = 3, do_init, uri_word = 0, mime_word = 4, app_type = 3, kind = 32, start_seek = 1;
 static const char *mime;
 static struct hmp_rect rect = { { 0, 0, 1920, 1080, 0 } };
@@ -261,6 +262,43 @@ static struct hmp_rect to_panel(struct hmp_rect r)
      return r;
 }
 
+/* The main video/audio path belongs to tvmain and follows the "source".
+ * The stock UI's media pages (DLNA, PVR media, sound test) take it with
+ * kilby.sl2.action.source.switch [ts, 9 (SWITCH_SOURCE), "DMP"]: systemserver's
+ * APM starts its virtual DmpProxy (no process forked), which has tvmain
+ * build the app path external://plain/dmp (static analysis,
+ * research/jellyfin/apm-path-re.md). Back: the same action with the input
+ * that was showing, as vibe-ui switches inputs. --dmp-path. */
+static void switch_source(const char *id)
+{
+     char ts[32];
+     snprintf(ts, sizeof ts, "%lld", (long long)now_ms());
+     const char *a[3] = { ts, "9", id };
+     say("note source.switch %s -> %d", id, biz_action(BIZ_ACTION_SWITCH, 3, a));
+}
+
+static void take_path(void)
+{
+     static char cur[BIZ_STR_MAX];
+     if (!dmp_path || !model()) return;
+     if (biz_get_str(BIZ_KEY_INPUT_CURRENT, cur) == 1)
+          snprintf(prev_input, sizeof prev_input, "%s", cur);
+     say("note input before: %s", prev_input);
+     switch_source("DMP");
+     for (int i = 0; i < 25; i++) {          /* up to 5 s: log what it becomes */
+          usleep(200000);
+          if (biz_get_str(BIZ_KEY_INPUT_CURRENT, cur) == 1 && strcmp(cur, prev_input)) break;
+     }
+     say("note input now: %s", cur);
+}
+
+static void give_back_path(void)
+{
+     if (!dmp_path || !model() || !prev_input[0] || !strcmp(prev_input, "DMP")) return;
+     switch_source(prev_input);
+     prev_input[0] = 0;                     /* once */
+}
+
 static void *start_thread(void *arg)
 {
      request_av();
@@ -295,6 +333,7 @@ static int open_url(void)
           say("trace init");
           if ((r = H.Init()) != 0) say("note HMPInit %d", r);
      }
+     take_path();
      say("trace create");
      if ((r = H.Create(&p, &player)) != 0 || !player) { say("error HMPCreate %d", r); return -1; }
      say("trace callback");
@@ -317,13 +356,14 @@ static int open_url(void)
 
 static void stop_player(void)
 {
-     if (!player) return;
+     if (!player) { give_back_path(); return; }
      H.Stop(player);
      H.UnRegisterCallback(player);
      H.Destroy(player);
      player = NULL;
      if (media_status && model())
           say("note media.status := 0 -> %d", biz_set_int(KEY_STREAM_MEDIA_STATUS, 0));
+     give_back_path();
      say("state stopped");
 }
 
@@ -388,6 +428,7 @@ int main(int argc, char **argv)
           else if (!strcmp(a, "--no-aout-init")) aout_init = 0;
           else if (!strcmp(a, "--av-request")) av_request = 1;
           else if (!strcmp(a, "--media-status")) media_status = 1;
+          else if (!strcmp(a, "--dmp-path")) dmp_path = 1;
           else if (!strncmp(a, "--rect=", 7))
                sscanf(a + 7, "%d,%d,%d,%d,%d", &rect.v[0], &rect.v[1], &rect.v[2], &rect.v[3], &rect.v[4]);
           else { fprintf(stderr, "vibe-play: unknown option %s\n", a); return 2; }
