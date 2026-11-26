@@ -588,3 +588,14 @@ at once, with no restart. Now also:
   shape inside the full-screen rect, leaving black bars. It is applied
   from the 1 s ticker, not inside the callback. Logged as `note video WxH
   aspect A:B`, to check against the static reading.
+
+**English default, first try (owner):** the menu showed English "On"
+while the TV played Portuguese, and no switch was sent. For this film the
+server's `DefaultAudioStreamIndex` was English (a language preference),
+but in direct play the TV's player takes the file's own default (the
+track with IsDefault, Portuguese here). The panel now treats the file's
+default as what plays, picks the server's choice (or English if that
+isn't English), and switches when they differ.
+Aspect ratio verified (owner). vibe-play logged `video 1920x800 aspect
+24000:10000` and set `rect 0,280 3840x1600`; the first event 19 had
+zeros, which are ignored.

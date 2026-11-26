@@ -1123,15 +1123,25 @@ static void apply(struct result *r, double now)
            * another language and the file has an English one, switch to it
            * once playing (direct play: the player switches in place) */
           U.want_audio = -1;
-          if (U.play->method != JF_TRANSCODE && r->kind == JB_PLAYINFO) {
-               const struct jf_stream *def = stream_of(U.play->audio_index);
-               if (!def || strcmp(def->lang, "eng")) {
-                    for (int i = 0; i < U.play->nstreams; i++)
-                         if (!strcmp(U.play->streams[i].type, "Audio") && !strcmp(U.play->streams[i].lang, "eng")) {
-                              U.want_audio = U.play->streams[i].index;
-                              break;
-                         }
+          if (U.play->method != JF_TRANSCODE) {
+               /* direct play: the TV's player takes the file's default
+                * track (flagged default, else the first audio), whatever
+                * the server's DefaultAudioStreamIndex says (seen: the
+                * server said English, the TV played the Portuguese default) */
+               int file_def = -1, first = -1, eng = -1;
+               for (int i = 0; i < U.play->nstreams; i++) {
+                    const struct jf_stream *st = &U.play->streams[i];
+                    if (strcmp(st->type, "Audio")) continue;
+                    if (first < 0) first = st->index;
+                    if (st->is_default && file_def < 0) file_def = st->index;
+                    if (eng < 0 && !strcmp(st->lang, "eng")) eng = st->index;
                }
+               if (file_def < 0) file_def = first;
+               int want = U.play->audio_index;
+               const struct jf_stream *ws = stream_of(want);
+               if ((!ws || strcmp(ws->lang, "eng")) && eng >= 0) want = eng;
+               U.play->audio_index = file_def;          /* what plays now */
+               if (want >= 0 && want != file_def) U.want_audio = want;
           }
           U.osd_until = now + 5;
           U.next_report = now + 10;
