@@ -512,3 +512,8 @@ at 313521 after 15 s, stop gave HDMI3 back (`4096,2160,60,0`), and the
 owner heard the sound. Six "Appending data failed" lines in the whole
 run. The picture was hidden by the panel, which was open during this
 background test, so it is checked from the panel with the switch file.
+
+**From the panel with the switch file (owner):** the HLS conversion plays
+with picture and sound. Pause, seek, resume and stop work, and the text
+subtitles stay in time after seeking. Switch file removed afterwards
+(direct play again).
