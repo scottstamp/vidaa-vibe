@@ -9,7 +9,7 @@ TV=${TV_HOST:?set TV_HOST}
 SSH="ssh -o UserKnownHostsFile=$KEYS/tv_known_hosts -p 2222 -i $KEYS/tv_root_ed25519 root@$TV"
 $SSH 'mkdir -p /var/local/vibe && chmod 755 /var/local/vibe'
 # stream through ssh (no scp dependency); write to .new then rename
-for b in vibe vibe-model vibe-ui vibe-gam vibe-play vibe-jf; do
+for b in vibe vibe-model vibe-ui vibe-gam vibe-play vibe-jf vibe-sem; do
     $SSH "cat > /var/local/vibe/$b.new && chmod 755 /var/local/vibe/$b.new && mv /var/local/vibe/$b.new /var/local/vibe/$b" < out/$b
 done
 # scripts may be running (boot.sh, vibe-run.sh): bash reads them as it goes,

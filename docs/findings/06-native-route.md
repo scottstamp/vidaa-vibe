@@ -1310,3 +1310,17 @@ test switch was removed.
   on the layer and skip GUICLOSED.
 - Slip during the search: a `grep -r` over `/var/log` hung on the
   `/var/log/console` fifo; the process was killed afterwards.
+
+**Correction (first boot with lever 1, owner watching): the full
+animation still played.** The stop file is not a stop signal. In
+`showAnimation` it is checked once, on the way out (0x136e8,
+`access()`), and only decides whether to skip showing `black.png`. The
+animation stops on the loop end, its timeout, or **`sem_trywait` on the
+named semaphore `GUICLOSE`** (`/dev/shm/sem.GUICLOSE`). That semaphore is
+posted by systemserver (`hs::appmanager::ApplicationManager::stopAnimation`,
+xrefs at 0x14dd64/0x14de64) and by tvmain ("UI stop boot animation but
+cannot find semphore GUICLOSE"); only boot_animation waits on it. So
+`early.sh` now posts it itself, through `vibe-sem post GUICLOSE`, as soon
+as the semaphore exists (polled every 50 ms for up to 5 s, in the
+background). The stop-file line is gone, so the animation still ends on
+`black.png`. Way back: `/var/local/vibe/splash.stock`.

@@ -28,16 +28,29 @@ exec > $V/early.log 2>&1
 echo "early.sh at uptime $(cat /proc/uptime)"
 
 # The VIDAA boot animation (/usr/local/bin/boot_animation, started by
-# rc.local before the hook) stops when this file exists: it shows black and
-# exits (read in its strings; docs/findings/06-native-route.md, "Boot
-# splashes"). Not when vibe-ui will not start this boot, and not with
-# /var/local/vibe/splash.stock (the way back; or remove these lines).
+# rc.local before the hook) polls the semaphore GUICLOSE and stops on it,
+# showing black.png; systemserver (ApplicationManager::stopAnimation) and
+# tvmain post it themselves at about 7 s. Post it as soon as it exists
+# (docs/findings/06-native-route.md, "Boot splashes"). In the background,
+# so the overlay below is not delayed. Not when vibe-ui will not start this
+# boot, and not with /var/local/vibe/splash.stock (the way back).
 splash_stop=1
 for f in $V/splash.stock $V/off /var/local/vibe-off /var/local/vibe-stock; do
     [ -f $f ] && splash_stop=0
 done
+[ -x $V/vibe-sem ] || splash_stop=0
 if [ $splash_stop = 1 ]; then
-    : > /tmp/drv_stop_boot_animation && echo "boot animation: stop file at uptime $(cat /proc/uptime)"
+    (
+        i=0
+        while [ ! -e /dev/shm/sem.GUICLOSE ] && [ $i -lt 100 ]; do
+            $BB usleep 50000; i=$((i + 1))
+        done
+        if [ -e /dev/shm/sem.GUICLOSE ]; then
+            $V/vibe-sem post GUICLOSE && echo "boot animation: GUICLOSE posted at uptime $(cat /proc/uptime)"
+        else
+            echo "boot animation: no GUICLOSE semaphore within 5 s"
+        fi
+    ) &
 fi
 
 # first, armed or not: did the last overlaid boot fail?
