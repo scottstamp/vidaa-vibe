@@ -1272,3 +1272,12 @@ reset work. Two display bugs fixed:
   the partial-redraw rectangle, so the knob's bottom edge stayed behind.
   The slider now sits at `y + row_h - 28`, and the focus rectangle gets a
   12 px margin for the shadow.
+
+**No-signal standby tested end to end (owner, 2026-11-26),** with the test
+switch `/var/local/vibe/nosig.test` (1 minute wait): the countdown
+appeared, the TV switched off (`switch.off.tv [3] -> r=1`) and woke
+normally with POWER, and a key during the countdown disarmed it ("Staying
+on"). Then, at the owner's request, the real wait went from the stock 14
+minutes to **4 minutes + the last minute (5 minutes)**, and the setting
+reads "After 5 min". The stored model value is still the stock on/off. The
+test switch was removed.

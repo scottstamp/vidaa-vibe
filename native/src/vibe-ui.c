@@ -100,7 +100,7 @@ static const int v_igr[] = { 0, 1, 2 };
 static const char *const n_igr[] = { "Off", "On", "Auto" };
 static const int v_sleep[] = { 0, 15, 30, 60, 90, 120 };
 static const char *const n_sleep[] = { "Off", "15 min", "30 min", "60 min", "90 min", "120 min" };
-static const char *const n_nosig[] = { "Off", "After 15 min" };
+static const char *const n_nosig[] = { "Off", "After 5 min" };
 static const int v_hdmi_fmt[] = { 0, 1, 2 };
 static const char *const n_hdmi_fmt[] = { "Standard", "Enhanced", "Auto" };
 
@@ -224,7 +224,7 @@ struct app {
      double sleep_deadline;        /* 0: no timer */
      int  sleep_warned;            /* the last-minute countdown is showing */
      int  sleep_kind;              /* OFF_TIMER or OFF_NOSIG, 0 when not armed */
-     int  nosig_standby;           /* setting: switch off after 15 min with no signal */
+     int  nosig_standby;           /* setting: switch off after 5 min with no signal */
      /* navigation to the HDMI-CEC device while no panel is open */
      int  cec_fwd_ok;              /* CEC on, HDMI input, device ready for remote */
      int  cec_held;                /* syskey pressed and not yet released, 0 none */
@@ -1284,10 +1284,12 @@ static void toast(struct app *a, const char *msg, double now)
 }
 
 /* ---- sleep timer and no-signal standby: one switch-off countdown, armed
- * by either (OFF_TIMER: the Sleep timer setting; OFF_NOSIG: 14 min with no
+ * by either (OFF_TIMER: the Sleep timer setting; OFF_NOSIG: 4 min with no
  * signal, the stock no-signal standby). Both end in the same last minute. */
 enum { OFF_TIMER = 1, OFF_NOSIG = 2 };
-#define NOSIG_STANDBY_S (14 * 60)       /* stock, panel type 0; + the last minute */
+/* owner's choice (stock: 14 min on panel type 0); + the last minute = 5 min.
+ * The stored setting stays the stock on/off (1 = on) */
+#define NOSIG_STANDBY_S (4 * 60)
 /* tests: /var/local/vibe/nosig.test makes it 1 minute (+ the last minute) */
 #define NOSIG_TEST_FILE "/var/local/vibe/nosig.test"
 static double nosig_wait(void) { return access(NOSIG_TEST_FILE, F_OK) == 0 ? 60.0 : NOSIG_STANDBY_S; }
@@ -2259,7 +2261,7 @@ int main(int argc, char **argv)
           check_signal(a, now);
           if (jfui_tick(now) && a->screen == S_JELLYFIN)
                a->dirty = 1;
-          /* no-signal standby: 14 min without signal on the current input,
+          /* no-signal standby: 4 min without signal on the current input,
            * then the last minute; a signal (or another input) ends it */
           /* (a Jellyfin film plays over an input with no signal) */
           if (a->sleep_kind == OFF_NOSIG && (!a->nosig_lost || jfui_playing()))
