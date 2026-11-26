@@ -19,9 +19,9 @@ bytes, SHA-256 `0aa799ab…5e426a95`) into `research/recovery/`
 
 ## Would MBOOT take it?
 
-MBOOT (from our `dd` copy, strings only) has a USB path (`his_ustar`,
-"check usb_xxx.bin file"): it lists `usb_*.bin` and `forcedupgrade_*.bin`
-on the stick, reads each bin info, compares the product name with the
+MBOOT has a USB path (`his_ustar`; traced in [11-mboot.md](11-mboot.md)):
+it lists every `*.bin` on the stick (`forcedupgrade_*` skips the version
+test), reads each bin info, compares the product name with the
 TV's, compares versions (a forced bin skips that), checks the full-file CRC
 and the script CRC, then runs the script.
 
@@ -34,8 +34,9 @@ On the TV, MBOOT's env (in `MPOOL`, `mmcblk0p2`, read with `dd`):
 | `panel_path` | `/config/panel/UD_VB1_8LANE_CSOT_URSA.ini` | script sets the same |
 | `MS_RFS` | `root=/dev/mmcblk0p19 …` | script sets the same |
 
-So the product check passes and the CRC passes. Whether `O.N0907` counts
-as newer than `N.N0907` was **not traced** (MBOOT prints versions as
+So the product check passes and the CRC passes, and `O.N0907` counts as
+newer than `N.N0907` (traced in 11; the rest of this paragraph predates that).
+Originally: the version compare was **not traced** (MBOOT prints versions as
 `%lld`; how it turns the strings into numbers is unread). If it does not,
 MBOOT reports "The system version is the latest"; the `forcedupgrade_`
 prefix exists for that case. How the USB path is started at boot (power-on
