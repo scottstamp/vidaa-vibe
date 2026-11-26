@@ -529,8 +529,23 @@ static void report(int event, double now)
      U.next_report = now + 10;
 }
 
-static int spawn_player(const char *url, int64_t start_ms)
+/* the HMP player needs the MIME type next to the URL (word 4 of its URI
+ * struct; findings 07) */
+static const char *play_mime(const struct jf_play *p)
 {
+     if (p->method == JF_TRANSCODE) return "application/x-mpegURL";   /* HLS */
+     const char *c = p->container;
+     if (strstr(c, "webm")) return "video/webm";
+     if (strstr(c, "mkv") || strstr(c, "matroska")) return "video/x-matroska";
+     if (strstr(c, "mp4") || strstr(c, "mov") || strstr(c, "m4v")) return "video/mp4";
+     if (strstr(c, "ts")) return "video/mp2t";
+     return "video/x-matroska";
+}
+
+static int spawn_player(const char *url, const char *mime, int64_t start_ms)
+{
+     char mime_arg[64];
+     snprintf(mime_arg, sizeof mime_arg, "--mime=%s", mime);
      int in[2], out[2];
      if (pipe2(in, O_CLOEXEC) != 0) return -1;
      if (pipe2(out, O_CLOEXEC) != 0) { close(in[0]); close(in[1]); return -1; }
@@ -547,7 +562,7 @@ static int spawn_player(const char *url, int64_t start_ms)
           if (devnull >= 0) dup2(devnull, 2);
           /* no DirectFB or fusion descriptors in the child */
           for (int fd = 3; fd < 1024; fd++) close(fd);
-          char *const argv[] = { (char *)"vibe-play", NULL };
+          char *const argv[] = { (char *)"vibe-play", mime_arg, NULL };
           execv(PLAYER_BIN, argv);
           _exit(127);
      }
@@ -844,7 +859,7 @@ static void apply(struct result *r, double now)
           int64_t start_ms = 0;
           if (U.play->method != JF_TRANSCODE) start_ms = U.playing.position_ticks / TICKS_PER_MS;
           if (r->start == 2) start_ms = 0;
-          if (spawn_player(U.play->url, start_ms) != 0) {
+          if (spawn_player(U.play->url, play_mime(U.play), start_ms) != 0) {
                set_err("could not start the player", now);
                free(U.play);
                U.play = NULL;
