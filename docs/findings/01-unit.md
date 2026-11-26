@@ -10,6 +10,7 @@ key fingerprint) are left out on purpose; they are in the gitignored
 | Field | Value | Source |
 | --- | --- | --- |
 | Model | `58A51HUV` (serial type `58A5HU`) | `Hisense_GetModelName()`, `Hisense_GetSerialType()` |
+| Serial number | in `server/recon-report-unit-identity.json` (gitignored) | `kilby.sl2.str.hisfactory.materiel.serial` (the stock UI's `getModelSerialNumber`); `factorySrv.ini serialnum` and `critical.ini BoardSerialNo` are empty on this unit |
 | Firmware | `V0000.06.30N.N0907` | `Hisense_GetFirmWareVersion()` |
 | VIDAA generation | U6 (`U06.30`) | `Hisense_GetOSVersion()`, `/usr/local/vidaa_version` |
 | SoC | MediaTek MT9602 | `Hisense_GetChipSetName()` |
