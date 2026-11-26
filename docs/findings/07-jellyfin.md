@@ -333,3 +333,28 @@ Next: find how the stock UI starts a full-screen app (the
 reads while an app plays, and whether that path needs `app_man` (which
 debloat stops). Also: the rect must be scaled to the panel (x2), and
 stop must not leave the HDMI window muted.
+
+### How the stock UI takes the video path: source "DMP" (static, 2026-11-26)
+
+Read in the stock JS and in systemserver/tvmain (full notes:
+`research/jellyfin/apm-path-re.md`; not yet tried on the TV):
+
+- The stock media pages switch the source to `DMP` with
+  `kilby.sl2.action.source.switch [ts, 9, "DMP"]`: DLNA (`DLNA.js`), PVR
+  media (`86.js`) and the sound test (`302.js`). HiMedia (USB media) uses
+  the reason-4 JSON form, which reaches the same handler.
+- tvmain stores the vector in `kilby.sl2.vstr.source.switch`, and
+  systemserver's APM watches it. For `DMP` the APM starts the virtual
+  `DmpProxy`, which forks nothing and needs no app_man/apmbond. That proxy
+  requests the resource; tvmain then gets
+  `kilby.sl2.action.apm.source.switch ["sourceSwitchForApp", sid, "DMP",
+  "external://plain/dmp", "", "-1"]` and builds the app path (source type 7).
+- Going back: the same action with the physical input (`[ts, 9, "HDMI3"]`,
+  as vibe-ui does). The stock pages do the same with `setSource("LAST")`.
+- Not to use: the ids `browser`, `cobalt`, `Youtube` and `Netflix`. Their
+  proxies fork the stock apps.
+- Unknown: whether HMP/libHui output reaches the window on the DMP path
+  (the browser uses `external://plain/browser`).
+
+vibe-play `--dmp-path` (off by default) switches to `DMP` before
+`HMPCreate` and back to the saved input at stop.
