@@ -1248,7 +1248,8 @@ int jfui_tick(double now)
           else if (U.osd_until > now && now >= U.next_redraw) { U.next_redraw = now + 1; U.dirty = 1; }
      }
      if (U.err_until && now >= U.err_until) { U.err_until = 0; U.dirty = 1; }
-     if (jfimg_changed() && (card_screen() || U.scr == J_DETAIL)) U.dirty = 1;
+     if (jfimg_changed() && (card_screen() || U.scr == J_DETAIL || (U.scr == J_PLAYER && U.pstate == 0)))
+          U.dirty = 1;
      int d = U.dirty;
      U.dirty = 0;
      return d && U.on;
@@ -1902,8 +1903,21 @@ static void draw_player(struct canvas *c, double now)
      if (U.pstate == 0) {
           /* starting: an opaque screen over the video plane, which may show
            * the first frames from 0:00 before a resume's seek lands */
-          if (c) gfx_fill_vgradient_full(c, 0xff05070c, 0xff0b0e16);
-          else {
+          if (c) {
+               gfx_fill_vgradient_full(c, 0xff05070c, 0xff0b0e16);
+               /* the detail page's backdrop (cached, same size), darker */
+               const struct jf_item *it = &U.playing;
+               const char *bid = NULL, *btag = NULL;
+               if (it->backdrop_tag[0]) { bid = it->id; btag = it->backdrop_tag; }
+               else if (it->parent_backdrop_id[0] && it->parent_backdrop_tag[0]) {
+                    bid = it->parent_backdrop_id; btag = it->parent_backdrop_tag;
+               }
+               const struct jfimg *bd = bid ? jfimg_get(bid, "Backdrop", btag, W, H) : NULL;
+               if (bd) {
+                    gfx_image(c, 0, 0, W, H, 0, bd->px, bd->w, 255);
+                    gfx_rrect(c, 0, 0, W, H, 0, 0xb805070c);
+               }
+          } else {
                char t[200];
                if (U.playing.type == JF_EPISODE && U.playing.series_name[0])
                     snprintf(t, sizeof t, "%s  ·  S%d E%d  %s", U.playing.series_name,

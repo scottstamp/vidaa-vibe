@@ -431,6 +431,10 @@ static void *start_thread(void *arg)
      say("rect %d -> %d", pr.v[2], r);
      if (r == 0) H.SetComponentMuteState(player, 2, 0);   /* unmute video (UNSURE: 2) */
      if (start_ms && start_seek) {
+          /* HMP plays a moment from 0:00 before the seek lands: audio off
+           * until the position reaches the start (component 1 = audio,
+           * from the browser backend) */
+          say("note audio mute -> %d", H.SetComponentMuteState(player, 1, 1));
           r = H.Seek(player, start_ms);
           say("seek %llu -> %d", (unsigned long long)start_ms, r);
           if (r == 0) {
@@ -452,6 +456,8 @@ static void *start_thread(void *arg)
                }
           }
      }
+     if (start_ms && start_seek)                  /* landed, or gave up: sound back */
+          say("note audio unmute -> %d", H.SetComponentMuteState(player, 1, 0));
      say("state playing");
      return NULL;
 }

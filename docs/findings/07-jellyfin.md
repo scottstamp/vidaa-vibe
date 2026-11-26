@@ -606,3 +606,12 @@ off by default, or the English *forced* text track if the file has one
 (`SubtitleStreamIndex=-1`), so it never picks a picture-based default
 that would force a burn-in conversion. The server's subtitle default is
 ignored.
+
+**Subtitle defaults verified (owner).** Then:
+- The loading screen shows the item's backdrop (the detail page's, from
+  the image cache), darkened, under the title and "Loading…".
+- Resume: vibe-play mutes audio (`HMPSetComponentMuteState(h, 1, 1)`;
+  component 1 = audio per the backend) right after `HMPStart` when it has
+  to seek, and unmutes when the position has passed the start point, just
+  before `state playing`. The mute only works once the decoders exist, so
+  a few ms after HMPStart returns may still sound.
