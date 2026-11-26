@@ -579,7 +579,8 @@ static void draw_settings(struct app *a, cv_t *c)
           int y = top + j * (row_h + 8), sel = j == a->sel;
           if (c && sel) {
                /* the whole row is focus: its highlight, the slider knob */
-               rect_add(&g_focus, rx, y, rx + rw, y + row_h);
+               /* (with a margin: the slider knob's shadow reaches past the row) */
+               rect_add(&g_focus, rx - 12, y - 12, rx + rw + 12, y + row_h + 12);
                gfx_rrect(c, rx, y, rw, row_h, 24, K_CARD_HI);
           }
           if (r->kind == R_ACTION) {
@@ -591,7 +592,8 @@ static void draw_settings(struct app *a, cv_t *c)
                     else gfx_rrect(c, px, py, pw, ph, ph / 2, K_CARD);
                } else {
                     text_v(a, a->f_item, rx + 32, y, row_h, sel ? K_TEXT : K_TEXT2, r->name, -1);
-                    text_v(a, armed ? a->f_bold : a->f_small, px + pw / 2, py, ph, K_TEXT, m, 0);
+                    /* one size for both (the bold one overflowed the button) */
+                    text_v(a, a->f_small, px + pw / 2, py, ph, K_TEXT, m, 0);
                }
           } else if (r->kind == R_CHOICE) {
                const char *m = a->val_known ? choice_name(r, v) : "...";
@@ -611,7 +613,10 @@ static void draw_settings(struct app *a, cv_t *c)
                char val[24];
                snprintf(val, sizeof(val), a->val_known ? "%d" : "...", v);
                if (c)
-                    slider(c, rx + 32, y + 82, rw - 64, a->val_known ? v : 0, sel);
+                    /* near the row's bottom: rows shrink when a page has many
+                     * (Picture: 96 px), and a fixed y + 82 put the knob
+                     * outside the row and its redraw */
+                    slider(c, rx + 32, y + row_h - 28, rw - 64, a->val_known ? v : 0, sel);
                else {
                     text_v(a, a->f_item, rx + 32, y + 12, 56, sel ? K_TEXT : K_TEXT2, r->name, -1);
                     text_v(a, a->f_bold, rx + rw - 32, y + 12, 56, K_TEXT, val, 1);

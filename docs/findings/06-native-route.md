@@ -1262,3 +1262,13 @@ directory to remove them. An input switch is undone by switching back
 (`vibe-model --yes switch-input HDMI3`) or with the remote's input key. A running
 `vibe` ends on its timeout, on EXIT/BACK, on SIGTERM, or by alarm 10 s
 after its timeout.
+
+**Settings checks (owner, 2026-11-26):** HDMI format change and picture
+reset work. Two display bugs fixed:
+- The armed "OK again to confirm" used the bold 38 px font and overflowed
+  its 320 px button; it now uses the same small font as "Press OK".
+- On pages with many rows (Picture: 7, so 96 px rows) the slider sat at a
+  fixed `y + 82`. The knob and its shadow hung below the row and outside
+  the partial-redraw rectangle, so the knob's bottom edge stayed behind.
+  The slider now sits at `y + row_h - 28`, and the focus rectangle gets a
+  12 px margin for the shadow.
