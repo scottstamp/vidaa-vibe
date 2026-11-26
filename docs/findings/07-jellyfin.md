@@ -381,3 +381,10 @@ The working sequence, as vibe-play runs it now (DMP on by default):
 The `hbbtv` request and the media status are not needed (both still
 opt-in). Open: if vibe-play is killed, nothing switches back. vibe-ui must
 re-select the input when the player dies.
+
+**From the panel (owner, 2026-11-26, deployed build):** play, OK
+pause/resume, LEFT/RIGHT seek and BACK stop all work, and HDMI comes back
+at stop. The resume point is offered after a stop a few minutes in
+(Jellyfin's own threshold). One glitch: the ◀ ▶ seek hint drew as boxes
+(the font has no arrow glyphs), so it now reads `LEFT/RIGHT`. Not yet
+tested: killing vibe-play mid-film (vibe-ui should switch back).
