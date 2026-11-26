@@ -277,3 +277,20 @@ Result of the same 60 s test:
 Also fixed: `say()` still wrote to `stdout` after `dup2(2,1)`, so protocol
 lines went out on stderr, mixed with vendor printf. It now writes to the
 saved protocol stream.
+
+**But still nothing on screen, and the video plane stayed black afterwards**
+(owner, same run). The decoders opened and took data, yet the owner saw no
+picture and heard no sound. vibe-ui's menus still drew over it (OSD fine;
+the panel was backlit dark grey). After vibe-play exited, switching to
+HDMI3 or HDMI2 with the remote still gave a black picture. Earlier runs
+(before `MI_SYS_Init`) also left the screen black, but changing input
+brought the picture back. This time only a reboot did; after it, HDMI3
+was selected as usual.
+
+Unknown: what holds the video plane. Guesses, not checked: the MI attach
+makes this process own handles (video path, display window, mute) that are
+not released or reset when it exits; or the source switch to STREAM inside
+esplayer is never undone, and with MI attached the HDMI switch no longer
+overrides it. Before the next run vibe-play needs a stop path that undoes
+the switch, and a way back without a reboot. Until then each playback test
+may need a reboot.
