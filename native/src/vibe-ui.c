@@ -495,7 +495,7 @@ static void draw_home(struct app *a, cv_t *c)
                       k < N_PAGES ? pages[k].sub : "Rename, hide", -1, 0);
 
      static const char *const h[] = { "ARROWS", "Navigate", "OK", "Select", "BACK", "Close" };
-     hints(a, c, a->W / 2, a->H - 96, h, 3);
+     hints(a, c, a->W / 2, a->H - 56, h, 3);
 }
 
 /* ---- quick inputs: left sheet */

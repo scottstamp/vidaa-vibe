@@ -2152,7 +2152,7 @@ void jfui_draw(struct canvas *c, double now)
           if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W - P_X, H - 150, 50, K_TEXT2, U.busy_msg, 1);
           if (!c && U.err_until > now) text(U.h.f_item, P_X, H - 150, 50, 0xffff8080, U.err, -1);
           static const char *const hd[] = { "LEFT/RIGHT", "Move", "OK", "Select", "BACK", "Back" };
-          U.h.hints(U.h.ctx, c, W / 2, H - 96, hd, 3);
+          U.h.hints(U.h.ctx, c, W / 2, H - 56, hd, 3);
           return;
      }
      const char *title = "Jellyfin";
