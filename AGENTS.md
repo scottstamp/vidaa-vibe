@@ -50,6 +50,7 @@ Ways back (all over SSH, each documented in 06-native-route.md):
 | `touch /var/local/vibe/jf.off` | no Jellyfin card on Home, from the next vibe-ui start (nothing of the Jellyfin code runs until the card is opened) |
 | `touch /var/local/vibe-stock` | at the next boot, `boot.sh` restores the original runtime file (md5-checked) and starts nothing; the stock UI is back from the boot after |
 | `HOOK_STEP=revert sh /var/local/vibe/hook-patch.sh` | takes our block out of the hook |
+| `touch /var/local/vibe/splash.stock` | the stock VIDAA boot animation again from the next boot (ours is `/var/local/vibe/splash`, bind-mounted by `early.sh`) |
 | `touch /var/local/vibe/jf.force-transcode` | test only: every Jellyfin play asks the server for its HLS conversion (remove it after) |
 
 ## Ground rules
@@ -164,6 +165,8 @@ tracked file if it quotes vendor code or carries the unit's identifiers.
 | `server/vidaa_server.py`, `server/pair.py` | alvidaa's launcher server and MQTT pairing, copied as they were |
 | `native/src/` | `vibe-ui` and the tools `vibe`, `vibe-model`, `vibe-gam` |
 | `native/src/jf*.c`, `http.c`, `vibe-play.c`, `vibe-jf.c` | Jellyfin: API (`jf.c`), panel (`jfui.c`), images (`jfimg.c`), subtitles (`jfsub.c`), the player child, a command-line client |
+| `native/splash/`, `native/tools/make-splash.py` | our boot animation (740x300 PNG frames + `animation.cfg`), deployed to `/var/local/vibe/splash` |
+| `native/src/vibe-sem.c` | posts a named semaphore (GUICLOSE ends the stock boot animation; not needed with our frames) |
 | `native/fonts/` | Noto Sans (OFL), deployed to `/var/local/vibe/fonts`; `*.ttf` is binary in `.gitattributes` |
 | `native/tv/` | the scripts deployed to `/var/local/vibe` (`boot.sh`, `debloat.sh`, `restart-ui.sh`, `hook-patch.sh`, probes) |
 | `native/slotb/` | the blank page for slot B and its installer |
