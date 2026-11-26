@@ -11,8 +11,9 @@
  *   vibe-jf [-s STATE] views | resume | nextup
  *   vibe-jf [-s STATE] latest PARENT | ls PARENT [START] | seasons SERIES
  *   vibe-jf [-s STATE] episodes SERIES SEASON | item ID
- *   vibe-jf [-s STATE] play ID [START_SECONDS]   negotiate, print the URL
+ *   vibe-jf [-s STATE] play ID [START_SECONDS [AUDIO_INDEX]]   negotiate, print the URL
  *   vibe-jf [-s STATE] image ID OUT.jpg [W H]
+ *   vibe-jf [-s STATE] get PATH                raw GET (debugging), e.g. /Sessions
  *   vibe-jf [-s STATE] sub ID INDEX            a text track as SRT: count, first cues
  *
  * STATE defaults to /var/local/vibe/state/jellyfin (the TV) or $JF_STATE.
@@ -150,7 +151,8 @@ int main(int argc, char **argv)
      if (strcmp(cmd, "play") == 0 && a < argc) {
           static struct jf_play p;
           int64_t start = a + 1 < argc ? (int64_t)atoll(argv[a + 1]) * 10000000 : 0;
-          if (jf_playback(&S, argv[a], start, -1, JF_SUB_DEFAULT, &p)) return fail(cmd);
+          int audio = a + 2 < argc ? atoi(argv[a + 2]) : -1;
+          if (jf_playback(&S, argv[a], start, audio, JF_SUB_DEFAULT, &p)) return fail(cmd);
           static const char *const M[] = { "direct play", "direct stream", "transcode" };
           printf("method: %s\ncontainer: %s\nsession: %s\nurl: %s\n", M[p.method], p.container,
                  p.play_session_id, p.url);
@@ -174,6 +176,16 @@ int main(int argc, char **argv)
           for (int i = 0; i < subs.n && i < 5; i++)
                printf("  %d-%d %s\n", subs.c[i].start_ms, subs.c[i].end_ms, subs.c[i].text);
           jf_subs_free(&subs);
+          free(d);
+          return 0;
+     }
+     if (strcmp(cmd, "get") == 0 && a < argc) {       /* raw GET of a server path, for debugging */
+          char url[JF_URL_MAX], *d;
+          size_t n;
+          snprintf(url, sizeof url, "%s%s", S.server, argv[a]);
+          if (jf_fetch(&S, url, &d, &n)) return fail(cmd);
+          fwrite(d, 1, n, stdout);
+          putchar(10);
           free(d);
           return 0;
      }

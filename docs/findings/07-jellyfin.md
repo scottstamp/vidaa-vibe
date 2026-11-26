@@ -547,3 +547,20 @@ PlaybackInfo had `StartTimeTicks`, so every method now starts at 0 and
 seeks, under the loading cover. Also fixed: audio track names were greyed
 (the grey is meant for picture-based subtitles), and "On" was unreadable
 on the focused row.
+
+**Audio switch still plays the default language (owner, "The Social
+Reckoning": #1 Portuguese (Brazil) E-AC-3 default, #2 English E-AC-3).**
+What was measured:
+- `PlaybackInfo` with `AudioStreamIndex=2` still offers direct play, and
+  echoes the request back as `DefaultAudioStreamIndex`. So the "remux
+  instead" check (requested != DefaultAudioStreamIndex) never fired from
+  vibe-jf. The server's session list nevertheless showed the TV on a remux
+  with `AudioStreamIndex: 2` (TS, video and audio copied).
+- The remux URL carries `AudioStreamIndex=2`, and its first TS segment has
+  one H.264 and one E-AC-3 stream (PMT, no language descriptor). But the
+  audio payload of segment 0 is **byte-identical** for
+  `AudioStreamIndex=1` and `=2` (md5 of the PID 257 payload). So with audio
+  copied, this server sent the same track whatever the index; or both
+  requests were served by one transcode job (not ruled out).
+- Next: switch tracks in the TV's player instead (`HMPSelectTrack`,
+  static analysis running); that also avoids the restart.
