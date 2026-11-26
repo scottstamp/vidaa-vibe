@@ -1093,9 +1093,11 @@ static void apply(struct result *r, double now)
           U.pos_ms = 0;
           U.seek_pending = 0;
           U.dur_ms = (double)(U.play->runtime_ticks ? U.play->runtime_ticks : U.playing.runtime_ticks) / TICKS_PER_MS;
-          /* direct play starts at 0 and seeks; a transcode starts where asked */
-          int64_t start_ms = 0;
-          if (U.play->method != JF_TRANSCODE) start_ms = U.playing.position_ticks / TICKS_PER_MS;
+          /* every method starts at 0 and seeks (the player covers the
+           * video until it lands): the server's HLS conversion starts at
+           * 0:00 whatever StartTimeTicks said (an audio-track switch
+           * restarted at 0:00, owner) */
+          int64_t start_ms = U.playing.position_ticks / TICKS_PER_MS;
           if (r->start == 2) start_ms = 0;
           if (spawn_player(U.play->url, play_mime(U.play), start_ms) != 0) {
                set_err("could not start the player", now);
@@ -1802,13 +1804,14 @@ static void draw_menu(struct canvas *c)
                char t[160];
                if (!st) snprintf(t, sizeof t, "Off");
                else snprintf(t, sizeof t, "%s", st->title[0] ? st->title : st->lang[0] ? st->lang : "Track");
-               uint32_t col = st && !st->is_text ? K_TEXT3 : K_TEXT;
+               /* grey: picture-based subtitles (not supported yet) */
+               uint32_t col = st && !strcmp(st->type, "Subtitle") && !st->is_text ? K_TEXT3 : K_TEXT;
                char ft[180];
                fit(U.h.f_item, t, mw - 160, ft, sizeof ft);
                text(U.h.f_item, x + 56, ry, row - 8, col, ft, -1);
                int on = st && !strcmp(st->type, "Audio") ? idx[i] == U.play->audio_index
                                                           : idx[i] == U.sub_index;
-               if (on) text(U.h.f_small, x + mw - 56, ry, row - 8, K_ACCENT_L, "On", 1);
+               if (on) text(U.h.f_small, x + mw - 56, ry, row - 8, i == U.menu_sel ? 0xffffffff : K_ACCENT_L, "On", 1);
           }
      }
      static const char *const h[] = { "OK", "Choose", "BACK", "Close" };

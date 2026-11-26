@@ -540,3 +540,10 @@ filled from player events not yet decoded.
 Pinned by the owner: picture-based subtitles (burn-in through a restart
 with `SubtitleStreamIndex` on the conversion path). No such content in the
 libraries yet; to pick up if one turns up.
+
+**Audio switch, seen (owner):** switching works, but it restarted at 0:00.
+The server's HLS conversion starts at the beginning even though
+PlaybackInfo had `StartTimeTicks`, so every method now starts at 0 and
+seeks, under the loading cover. Also fixed: audio track names were greyed
+(the grey is meant for picture-based subtitles), and "On" was unreadable
+on the focused row.
