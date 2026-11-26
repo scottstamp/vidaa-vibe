@@ -358,3 +358,26 @@ Read in the stock JS and in systemserver/tvmain (full notes:
 
 vibe-play `--dmp-path` (off by default) switches to `DMP` before
 `HMPCreate` and back to the saved input at stop.
+
+**Verified on the screen (owner, 2026-11-26): picture and sound.** With
+`--dmp-path` and no other model call, the film played full screen with
+sound. Seek worked, and at stop the switch back to HDMI3 brought the HDMI
+picture back (no reboot). Log: `source.switch DMP -> 1`, rect
+3840x2160 -> 0, both injectors opened, stop `source.switch HDMI3 -> 1`.
+`kilby.sl2.str.source.input.current` read `HDMI3` throughout, so it
+does not show `DMP`.
+
+The working sequence, as vibe-play runs it now (DMP on by default):
+
+1. Load the libraries, then `MI_SYS_Init(NULL)` and `MI_AOUT_Init`.
+2. Save the current input, then `source.switch [ts, 9, "DMP"]`.
+3. HMPCreate → RegisterCallback → SetURI (word 0 URL, word 4 MIME) →
+   Prepare → SetSubtitleShowState(0).
+4. HMPStart, then SetDisplayRect in panel pixels, then
+   SetComponentMuteState(2, 0).
+5. At stop: Stop, UnRegisterCallback, Destroy, then
+   `source.switch [ts, 9, <saved input>]`.
+
+The `hbbtv` request and the media status are not needed (both still
+opt-in). Open: if vibe-play is killed, nothing switches back. vibe-ui must
+re-select the input when the player dies.

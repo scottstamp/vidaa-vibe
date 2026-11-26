@@ -24,7 +24,7 @@
  * usage: vibe-play [--user=UID:GID[:G,...]] [--uri-word=N] [--mime=TYPE]
  *                  [--mime-word=N] [--rect=X,Y,W,H,Z] [--app-type=N]
  *                  [--kind=N] [--no-start-seek] [--probe]
- *                  [--av-request] [--media-status] [--dmp-path] [--no-aout-init]
+ *                  [--av-request] [--media-status] [--no-dmp-path] [--no-aout-init]
  * --probe: load the library and resolve the symbols, then exit (no player
  * is made, nothing shows)
  */
@@ -105,7 +105,7 @@ static void say(const char *fmt, ...)
 /* ---- state -------------------------------------------------------------- */
 
 static hmp_t player;
-static int av_request, media_status, dmp_path, model_ok = -1;
+static int av_request, media_status, dmp_path = 1, model_ok = -1;
 static char prev_input[64];
 static int aout_init = 1, data_type = 3, do_init, uri_word = 0, mime_word = 4, app_type = 3, kind = 32, start_seek = 1;
 static const char *mime;
@@ -268,7 +268,8 @@ static struct hmp_rect to_panel(struct hmp_rect r)
  * APM starts its virtual DmpProxy (no process forked), which has tvmain
  * build the app path external://plain/dmp (static analysis,
  * research/jellyfin/apm-path-re.md). Back: the same action with the input
- * that was showing, as vibe-ui switches inputs. --dmp-path. */
+ * that was showing, as vibe-ui switches inputs. On by default (picture,
+ * sound and the way back verified on the screen); --no-dmp-path. */
 static void switch_source(const char *id)
 {
      char ts[32];
@@ -429,6 +430,7 @@ int main(int argc, char **argv)
           else if (!strcmp(a, "--av-request")) av_request = 1;
           else if (!strcmp(a, "--media-status")) media_status = 1;
           else if (!strcmp(a, "--dmp-path")) dmp_path = 1;
+          else if (!strcmp(a, "--no-dmp-path")) dmp_path = 0;
           else if (!strncmp(a, "--rect=", 7))
                sscanf(a + 7, "%d,%d,%d,%d,%d", &rect.v[0], &rect.v[1], &rect.v[2], &rect.v[3], &rect.v[4]);
           else { fprintf(stderr, "vibe-play: unknown option %s\n", a); return 2; }
