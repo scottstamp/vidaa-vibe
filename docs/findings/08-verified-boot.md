@@ -43,3 +43,37 @@ on the TV.
 - Open, if this is ever wanted: compare `vbmetaB` with `vbmeta`; find out
   what `bootflag` (p4) selects; read MBOOT's AVB handling (rollback,
   fallback).
+
+## A/B and recovery (read-only, 2026-11-26)
+
+- **Running slot: B.** `/proc/cmdline` has `bootflag=1`, `otaflag=85`,
+  and `androidboot.vbmeta.device=179:16` (= `mmcblk0p16`, `vbmetaB`);
+  `androidboot.vbmeta.digest` equals the SHA-256 of `vbmetaB` (4160
+  bytes). `bootflag` (p4) starts `01 00 00 00 55 55 00 55`.
+- **Only the boot chain is doubled:** `KL`/`KLB`, `optee`/`opteeB`,
+  `armfw`/`armfwB`, `vbmeta`/`vbmetaB`, `rootfs`/`rootfsB`. Single copies:
+  `LIB`, `MWLIB`, `APP`, `3rd`, `usrfs`, `optfs` (and the data
+  partitions). Both vbmetas are signed with the test key (rollback index
+  0), and both list hash trees for the single partitions, **with different
+  root digests in A and B for every partition**. Either slot A belongs to
+  older contents (the single partitions since overwritten by an OTA, so A
+  may not verify any more) or the salt differs per build. Recomputing a
+  hash tree would tell them apart; not done.
+- MBOOT (read with `dd`, strings only) has `validate_vbmeta_public_key`,
+  rollback indexes kept in **RPMB** (`read_/write_rollback_index`,
+  `avb_load_info_from_rpmb`), an AVB status screen (`do_avbShowStatus`,
+  `Load_avb_jpg`), `read_/write_bootflag_partition`, a recovery mode
+  ("boot to recovery mode", `readKL recovery; bootKL`), boot modes chosen
+  from the keypad (`get_boot_mode_from_keypad`), and **USB flashing from
+  the bootloader** (`do_usb_partial_upgrade_to_emmc`, `ota_zip_check_usb`,
+  `do_usb_bin_check`, `do_flash_bin`). Not traced: what it does after a
+  failed verification (fall back to the other slot, the status screen,
+  recovery), or which key press starts USB flashing.
+
+So the A/B scheme is **not a safety net for the partitions that hold the
+services** (`usrfs`, `optfs`): they exist once, and both slots check
+them. A failed edit there would be undone only by re-flashing them, for
+example through MBOOT's USB path with an official firmware image for this
+model (not on hand). Changes limited to `rootfs` or `KL` could in principle
+be tried on the inactive slot A, but slot A may not verify against
+today's single partitions anyway.
