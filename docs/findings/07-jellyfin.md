@@ -615,3 +615,14 @@ ignored.
   to seek, and unmutes when the position has passed the start point, just
   before `state playing`. The mute only works once the decoders exist, so
   a few ms after HMPStart returns may still sound.
+
+### Latest shelves (2026-11-26)
+
+Backdrop on the loading screen and the resume mute verified (owner). The
+large-library paging test was skipped (not enough content).
+Home now has "Latest <library>" shelves after Next Up (`/Items/Latest`, 16
+per library, up to 8 libraries, playlists and live TV skipped), as the
+web client's home: posters for movies, shows and collections, 16:9 cards
+for other libraries (home videos). A lone new episode in "Latest Shows"
+shows its series' poster. Checked off-screen: Latest Shows, Latest Movies,
+Latest Home Videos.

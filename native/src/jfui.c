@@ -60,6 +60,9 @@ enum job_kind {
      JB_DETAIL, JB_PLAYINFO, JB_REPORT, JB_PLAYED, JB_LOGOUT, JB_STOP_TC, JB_SUBS
 };
 enum list_kind { LK_CHILDREN, LK_SEASONS, LK_EPISODES };
+#define LATEST_MAX 8                 /* "Latest ..." shelves: at most this many libraries */
+#define HOME_LISTS (3 + LATEST_MAX)
+enum { SH_MEDIA, SH_RESUME, SH_NEXT, SH_ACCOUNT, SH_LATEST, SH_KINDS = SH_LATEST + LATEST_MAX };
 
 struct job {
      enum job_kind kind;
@@ -80,7 +83,7 @@ struct result {
      struct jf_server servers[8];
      int  nservers;
      char code[16], secret[128];
-     struct jf_list lists[3];
+     struct jf_list lists[HOME_LISTS];   /* JB_HOME: resume, next up, views, latest per view */
      struct jf_item item;
      struct jf_play *play;
      char server_name[64], user_name[64];
@@ -123,7 +126,7 @@ static void deliver(struct result *r)
      }
      pthread_mutex_unlock(&q_lock);
      if (r) {               /* queue full: drop */
-          for (int i = 0; i < 3; i++) jf_list_free(&r->lists[i]);
+          for (int i = 0; i < HOME_LISTS; i++) jf_list_free(&r->lists[i]);
           free(r->item.overview);
           free(r->play);
           jf_subs_free(&r->subs);
@@ -186,6 +189,13 @@ static void *worker(void *arg)
                if (r->rc == 0) {
                     jf_resume(&S, 12, &r->lists[0]);     /* optional rows */
                     jf_next_up(&S, 12, &r->lists[1]);
+                    /* "Latest <library>", as the web client's home */
+                    for (int v = 0; v < r->lists[2].n && v < LATEST_MAX; v++) {
+                         const struct jf_item *vw = &r->lists[2].items[v];
+                         if (!strcmp(vw->collection, "playlists") || !strcmp(vw->collection, "livetv"))
+                              continue;
+                         jf_latest(&S, vw->id, 16, &r->lists[3 + v]);
+                    }
                }
                break;
           case JB_LIST:
@@ -277,7 +287,8 @@ static struct {
      char qc_code[16], qc_secret[128];
      double qc_next, qc_until;
 
-     struct jf_list home[3];     /* resume, next up, views */
+     struct jf_list home[HOME_LISTS];   /* resume, next up, views, latest per view */
+     char latest_title[LATEST_MAX][96];
      struct level lv[MAX_DEPTH];
      int  depth;                 /* LIST screens open */
 
@@ -295,10 +306,10 @@ static struct {
           struct jf_item *items;
           int  n, land, grid;     /* 16:9 cards (else 2:3 posters); a wrapping grid */
           int  sel, scroll;       /* focused card; first card shown (rows) */
-     } sh[4];
+     } sh[4 + LATEST_MAX];
      int  nsh, cur, vtop;        /* shelves, the focused one, the first shown
                                   * (grid: the first line shown) */
-     int  hsel[4], hscroll[4], hcur, hvtop;   /* Home's, kept by SH_* kind */
+     int  hsel[SH_KINDS], hscroll[SH_KINDS], hcur, hvtop;   /* Home's, kept by SH_* kind */
 
      /* playback */
      pid_t pid;
@@ -435,7 +446,7 @@ static int first_selectable(int from, int dir)
 
 /* ------------------------------------------------------------ card screens */
 
-enum { SH_MEDIA, SH_RESUME, SH_NEXT, SH_ACCOUNT };
+/* shelf kinds (Home keeps its focus per kind); SH_LATEST + i: library i */
 
 /* geometry, UI pixels (1920x1080) */
 #define C_X0     96                 /* left edge of the cards */
@@ -498,7 +509,7 @@ static int card_screen(void) { return U.scr == J_HOME || U.scr == J_LIST; }
 
 static void add_shelf(int kind, const char *title, struct jf_item *items, int n, int land, int grid)
 {
-     if (U.nsh >= 4) return;
+     if (U.nsh >= 4 + LATEST_MAX) return;
      U.sh[U.nsh++] = (struct shelf){ kind, title, items, n, land, grid, 0, 0 };
 }
 
@@ -509,6 +520,14 @@ static void build_cards(void)
           if (U.home[2].n) add_shelf(SH_MEDIA, "My Media", U.home[2].items, U.home[2].n, 1, 0);
           if (U.home[0].n) add_shelf(SH_RESUME, "Continue Watching", U.home[0].items, U.home[0].n, 1, 0);
           if (U.home[1].n) add_shelf(SH_NEXT, "Next Up", U.home[1].items, U.home[1].n, 1, 0);
+          for (int v = 0; v < LATEST_MAX && v < U.home[2].n; v++) {
+               struct jf_list *l = &U.home[3 + v];
+               if (!l->n) continue;
+               const char *col = U.home[2].items[v].collection;
+               int posters = !strcmp(col, "movies") || !strcmp(col, "tvshows") || !strcmp(col, "boxsets");
+               snprintf(U.latest_title[v], sizeof U.latest_title[v], "Latest %s", U.home[2].items[v].name);
+               add_shelf(SH_LATEST + v, U.latest_title[v], l->items, l->n, !posters, 0);
+          }
           add_shelf(SH_ACCOUNT, "Account", NULL, 1, 1, 0);       /* one card: Sign out */
           U.cur = 0;
           for (int i = 0; i < U.nsh; i++) {
@@ -1049,7 +1068,7 @@ static void apply(struct result *r, double now)
            * shelf was there) starts at the top */
           if (U.scr == J_HOME && (U.home[0].n || U.home[1].n || U.home[2].n)) save_cards();
           else if (!(U.home[0].n || U.home[1].n || U.home[2].n)) { U.hcur = SH_MEDIA; U.hvtop = 0; }
-          for (int s = 0; s < 3; s++) { jf_list_free(&U.home[s]); U.home[s] = r->lists[s]; r->lists[s] = (struct jf_list){ 0 }; }
+          for (int s = 0; s < HOME_LISTS; s++) { jf_list_free(&U.home[s]); U.home[s] = r->lists[s]; r->lists[s] = (struct jf_list){ 0 }; }
           if (U.scr == J_HOME) go(J_HOME, 0);
           break;
      case JB_LIST: {
@@ -1183,7 +1202,7 @@ static void apply(struct result *r, double now)
           break;
      case JB_LOGOUT:
           U.signed_in = 0;
-          for (int s = 0; s < 3; s++) jf_list_free(&U.home[s]);
+          for (int s = 0; s < HOME_LISTS; s++) jf_list_free(&U.home[s]);
           go(J_SERVERS, 0);
           {
                struct job j = { .kind = JB_DISCOVER };
@@ -1205,7 +1224,7 @@ int jfui_tick(double now)
           pthread_mutex_unlock(&q_lock);
           if (!r) break;
           apply(r, now);
-          for (int i = 0; i < 3; i++) jf_list_free(&r->lists[i]);
+          for (int i = 0; i < HOME_LISTS; i++) jf_list_free(&r->lists[i]);
           free(r->item.overview);
           free(r->play);
           jf_subs_free(&r->subs);
@@ -1659,6 +1678,10 @@ static int card_image(const struct jf_item *it, int land, const char **id, const
 {
      *kind = "Primary"; *id = it->id; *tag = it->primary_tag;
      if (!land) {
+          /* an episode in a poster row ("Latest Shows"): the series' poster */
+          if (it->type == JF_EPISODE && it->series_id[0] && it->series_primary_tag[0]) {
+               *id = it->series_id; *tag = it->series_primary_tag; return 1;
+          }
           if (it->primary_tag[0]) return 1;
           if (it->series_id[0] && it->series_primary_tag[0]) { *id = it->series_id; *tag = it->series_primary_tag; return 1; }
           return 0;
