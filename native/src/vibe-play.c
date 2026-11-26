@@ -24,6 +24,7 @@
  * usage: vibe-play [--user=UID:GID[:G,...]] [--uri-word=N] [--mime=TYPE]
  *                  [--mime-word=N] [--rect=X,Y,W,H,Z] [--app-type=N]
  *                  [--kind=N] [--no-start-seek] [--probe]
+ *                  [--av-request] [--media-status] [--no-aout-init]
  * --probe: load the library and resolve the symbols, then exit (no player
  * is made, nothing shows)
  */
@@ -42,6 +43,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "biz.h"
 #include "common.h"
 
 /* ---- the HMP ABI (UNSURE where marked) ---------------------------------- */
@@ -103,6 +105,7 @@ static void say(const char *fmt, ...)
 /* ---- state -------------------------------------------------------------- */
 
 static hmp_t player;
+static int av_request, media_status, model_ok = -1;
 static int aout_init = 1, data_type = 3, do_init, uri_word = 0, mime_word = 4, app_type = 3, kind = 32, start_seek = 1;
 static const char *mime;
 static struct hmp_rect rect = { { 0, 0, 1920, 1080, 0 } };
@@ -209,8 +212,36 @@ static int load(void)
 
 /* HMPStart blocks until the stream runs (it waits for prepare, codec
  * discovery, and opens the decoders): its own thread */
+/* The stock browser's media backend (libhisense-uva-backend,
+ * HiBackendStreamingBackendImpl::proccessPlay -> UVABackendTvAccess::
+ * pauseDtvAVSync()) asks tvmain for the A/V resource right before HMPStart:
+ * kilby.sl2.action.source.switch ["ss_access_<n>", "2" (REQUEST_RESOURCE),
+ * "hbbtv", "3"], all strings, blocking until tvmain answers (up to 5 s).
+ * MediaBackend::play() first sets the HbbTV stream-media status to 1; the
+ * backend sets it back to 0 when the source is released. It never sends a
+ * release (reason 3). Both are opt-in (--av-request, --media-status) until
+ * a run on the screen shows what they do. */
+#define KEY_STREAM_MEDIA_STATUS "kilby.sl2.i32.videoplayer.enum.hbbtv.stream.media.status"
+
+static int model(void)
+{
+     if (model_ok < 0) model_ok = biz_open() == 0;
+     return model_ok;
+}
+
+static void request_av(void)
+{
+     if (media_status && model())
+          say("note media.status := 1 -> %d", biz_set_int(KEY_STREAM_MEDIA_STATUS, 1));
+     if (av_request && model()) {
+          const char *a[4] = { "ss_access_1", "2", "hbbtv", "3" };
+          say("note source.switch request -> %d", biz_action(BIZ_ACTION_SWITCH, 4, a));
+     }
+}
+
 static void *start_thread(void *arg)
 {
+     request_av();
      say("trace start");
      int r = H.Start(player);
      if (r != 0) { say("error HMPStart %d", r); return NULL; }
@@ -268,6 +299,8 @@ static void stop_player(void)
      H.UnRegisterCallback(player);
      H.Destroy(player);
      player = NULL;
+     if (media_status && model())
+          say("note media.status := 0 -> %d", biz_set_int(KEY_STREAM_MEDIA_STATUS, 0));
      say("state stopped");
 }
 
@@ -330,6 +363,8 @@ int main(int argc, char **argv)
           else if (!strcmp(a, "--probe")) probe = 1;
           else if (!strcmp(a, "--init")) do_init = 1;
           else if (!strcmp(a, "--no-aout-init")) aout_init = 0;
+          else if (!strcmp(a, "--av-request")) av_request = 1;
+          else if (!strcmp(a, "--media-status")) media_status = 1;
           else if (!strncmp(a, "--rect=", 7))
                sscanf(a + 7, "%d,%d,%d,%d,%d", &rect.v[0], &rect.v[1], &rect.v[2], &rect.v[3], &rect.v[4]);
           else { fprintf(stderr, "vibe-play: unknown option %s\n", a); return 2; }

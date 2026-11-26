@@ -84,7 +84,7 @@ JF_SRC="src/jf.c src/http.c third_party/cjson/cJSON.c"
 # Jellyfin: command-line client (libcurl by dlopen)
 "$ZIG" cc $CFLAGS -o "$OUT/vibe-jf" src/vibe-jf.c $JF_SRC -ldl -lpthread $COMMON_LD
 # the player child (libhmplayer by dlopen; re-execs itself with the vendor library path)
-"$ZIG" cc $CFLAGS -o "$OUT/vibe-play" src/vibe-play.c src/common.c -ldl -lpthread $COMMON_LD
+"$ZIG" cc $CFLAGS -o "$OUT/vibe-play" src/vibe-play.c src/biz.c src/common.c -ldl -lpthread $COMMON_LD
 # the Jellyfin panel without DirectFB, for tests over SSH (not deployed)
 "$ZIG" cc $CFLAGS -o "$OUT/jfui_test" tools/jfui_test.c src/jfui.c $JF_SRC src/gfx.c src/common.c -ldl -lm -lpthread $COMMON_LD
 # benchmark of the drawing primitives (not deployed by default)
