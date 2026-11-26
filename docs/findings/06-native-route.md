@@ -1324,3 +1324,13 @@ cannot find semphore GUICLOSE"); only boot_animation waits on it. So
 as the semaphore exists (polled every 50 ms for up to 5 s, in the
 background). The stop-file line is gone, so the animation still ends on
 `black.png`. Way back: `/var/local/vibe/splash.stock`.
+
+**GUICLOSE boot (owner: "about the same, maybe slightly shorter"):**
+`early.log` shows `GUICLOSE posted at uptime 6.82`. The semaphore does
+not exist before ~6.8 s, so posting it saves very little. Next test: our
+own frames, from `native/tools/make-splash.py test` (black, a white bar
+growing over 30 frames, 740x300 like the stock ones). `early.sh`
+bind-mounts `/var/local/vibe/splash` (`animation.cfg` + `part1/`) over
+`/usr/local/animation/hisense` first thing (~5.3 s), and then does not
+post GUICLOSE. Way back: `/var/local/vibe/splash.stock`, or remove
+`/var/local/vibe/splash`.

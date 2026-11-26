@@ -17,6 +17,13 @@ done
 for f in vibe-run.sh boot.sh hook-patch.sh powermon.sh restart-ui.sh debloat.sh cecmon.sh early.sh early-prepare.sh; do
     $SSH "cat > /var/local/vibe/$f.new && chmod 755 /var/local/vibe/$f.new && mv /var/local/vibe/$f.new /var/local/vibe/$f" < tv/$f
 done
+# our boot animation (native/tools/make-splash.py): animation.cfg + part1/
+if [ -f splash/animation.cfg ]; then
+    $SSH 'mkdir -p /var/local/vibe/splash/part1 && chmod 755 /var/local/vibe/splash /var/local/vibe/splash/part1'
+    for f in splash/animation.cfg splash/part1/*.png; do
+        $SSH "cat > /var/local/vibe/$f.new && chmod 644 /var/local/vibe/$f.new && mv /var/local/vibe/$f.new /var/local/vibe/$f" < "$f"
+    done
+fi
 # fonts (Noto Sans, OFL): vibe-ui falls back to the stock Roboto without them
 $SSH 'mkdir -p /var/local/vibe/fonts && chmod 755 /var/local/vibe/fonts'
 for f in fonts/*.ttf; do

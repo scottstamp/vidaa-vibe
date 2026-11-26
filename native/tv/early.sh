@@ -38,6 +38,20 @@ splash_stop=1
 for f in $V/splash.stock $V/off /var/local/vibe-off /var/local/vibe-stock; do
     [ -f $f ] && splash_stop=0
 done
+# Our own animation, if there is one: $V/splash (animation.cfg + part1/
+# frames, made by native/tools/make-splash.py) bind-mounted over the stock
+# folder (read-only dm-5, nothing written). boot_animation builds each
+# frame's path as it plays, so frames read after the mount come from ours;
+# whether its config was read before ~5.3 s is what the first boot shows.
+# Then the animation is left to play (no early GUICLOSE).
+if [ $splash_stop = 1 ] && [ -f $V/splash/animation.cfg ] && [ -d $V/splash/part1 ]; then
+    if /bin/mount --bind $V/splash /usr/local/animation/hisense; then
+        echo "boot animation: ours mounted at uptime $(cat /proc/uptime)"
+        splash_stop=0
+    else
+        echo "boot animation: mount failed, rc=$?"
+    fi
+fi
 [ -x $V/vibe-sem ] || splash_stop=0
 if [ $splash_stop = 1 ]; then
     (

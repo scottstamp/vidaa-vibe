@@ -8,3 +8,4 @@ native/**   text eol=lf
 server/tv   text eol=lf
 # binaries under native/ (the rule above would rewrite their bytes)
 *.ttf       binary
+*.png       binary
