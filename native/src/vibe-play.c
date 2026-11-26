@@ -332,7 +332,22 @@ static void *start_thread(void *arg)
      if (start_ms && start_seek) {
           r = H.Seek(player, start_ms);
           say("seek %llu -> %d", (unsigned long long)start_ms, r);
-          if (r == 0) clock_set((double)start_ms, 1);
+          if (r == 0) {
+               clock_set((double)start_ms, 1);
+               /* HMP plays a moment from 0:00 before the seek lands; the UI
+                * covers the video until "state playing", so say it once the
+                * player's position has reached the start (at most 8 s) */
+               for (int i = 0; i < 80; i++) {
+                    struct hmp_pts pt;
+                    memset(&pt, 0, sizeof pt);
+                    if (H.GetPts(player, &pt) == 0 && pt.pts + 2000 >= start_ms && pt.pts < start_ms + 60000) {
+                         say("note at %llu after %d ms", (unsigned long long)pt.pts, i * 100);
+                         clock_set((double)pt.pts, 1);
+                         break;
+                    }
+                    usleep(100000);
+               }
+          }
      }
      say("state playing");
      return NULL;

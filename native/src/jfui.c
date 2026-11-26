@@ -1536,6 +1536,21 @@ static void draw_player(struct canvas *c, double now)
      int W = U.h.W, H = U.h.H;
      int bx = 120, bw = W - 240, by = H - 200;
      double pos = U.seek_pending ? U.seek_target_ms : U.pos_ms;
+     if (U.pstate == 0) {
+          /* starting: an opaque screen over the video plane, which may show
+           * the first frames from 0:00 before a resume's seek lands */
+          if (c) gfx_fill_vgradient_full(c, 0xff05070c, 0xff0b0e16);
+          else {
+               char t[200];
+               if (U.playing.type == JF_EPISODE && U.playing.series_name[0])
+                    snprintf(t, sizeof t, "%s  Â·  S%d E%d  %s", U.playing.series_name,
+                             U.playing.season, U.playing.episode, U.playing.name);
+               else snprintf(t, sizeof t, "%s", U.playing.name);
+               text(U.h.f_head, W / 2, H / 2 - 90, 70, K_TEXT, t, 0);
+               text(U.h.f_item, W / 2, H / 2 + 10, 50, K_TEXT2, "Loadingâ¦", 0);
+          }
+          return;
+     }
      if (c) {
           gfx_rrect(c, 60, H - 300, W - 120, 240, 32, 0xc0101420);
           gfx_rrect(c, bx, by, bw, 10, 5, K_TRACK);
