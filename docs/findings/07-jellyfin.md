@@ -498,3 +498,17 @@ back and returns to the detail page.
 
 **The remote's CC button** sends key `0xf069` (code 617), a Hisense code
 past DirectFB's list, not `DIKS_SUBTITLE`. It opens the subtitle menu now.
+
+### Transcode (HLS) on the TV (2026-11-26)
+
+Forced with `JF_FORCE_TRANSCODE=1`, or the switch file
+`/var/local/vibe/jf.force-transcode` (no direct play or direct stream).
+For the South Park episode the server offered
+`/videos/{id}/master.m3u8?...VideoCodec=h264,hevc&AudioCodec=ac3...&SegmentContainer=ts`
+(TranscodeReasons=DirectPlayError, i.e. forced). vibe-play with
+`--mime=application/x-mpegURL`: both injectors opened, the position
+advanced (20145 ms at 30 s), pause/resume worked, a seek to 300000 landed
+at 313521 after 15 s, stop gave HDMI3 back (`4096,2160,60,0`), and the
+owner heard the sound. Six "Appending data failed" lines in the whole
+run. The picture was hidden by the panel, which was open during this
+background test, so it is checked from the panel with the switch file.

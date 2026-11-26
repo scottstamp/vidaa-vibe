@@ -543,8 +543,13 @@ int jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
      if (audio_index >= 0) cJSON_AddNumberToObject(b, "AudioStreamIndex", audio_index);
      if (subtitle_index != JF_SUB_DEFAULT)
           cJSON_AddNumberToObject(b, "SubtitleStreamIndex", subtitle_index);
-     cJSON_AddBoolToObject(b, "EnableDirectPlay", 1);
-     cJSON_AddBoolToObject(b, "EnableDirectStream", 1);
+     /* tests: $JF_FORCE_TRANSCODE=1, or the file
+      * /var/local/vibe/jf.force-transcode, asks for the server's conversion
+      * even when the file would play as it is */
+     int force_tc = (getenv("JF_FORCE_TRANSCODE") && getenv("JF_FORCE_TRANSCODE")[0] == '1') ||
+                    access("/var/local/vibe/jf.force-transcode", F_OK) == 0;
+     cJSON_AddBoolToObject(b, "EnableDirectPlay", !force_tc);
+     cJSON_AddBoolToObject(b, "EnableDirectStream", !force_tc);
      cJSON_AddBoolToObject(b, "EnableTranscoding", 1);
      cJSON_AddBoolToObject(b, "AllowVideoStreamCopy", 1);
      cJSON_AddBoolToObject(b, "AllowAudioStreamCopy", 1);
