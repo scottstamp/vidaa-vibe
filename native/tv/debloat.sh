@@ -234,7 +234,65 @@ ui_pass() {
     ALL="$ALL $STOP_UI"
 }
 
+# Diagnostics (read-only): once, a vibe-ui boot could not draw because the
+# shared DirectFB world kept a full-screen surface owned by a dead process
+# that nothing had recorded (docs/findings/05-traps.md). proc_watch logs
+# every process seen in the first 60 s of uptime, once each, to
+# boot-procs.log, then checks /proc/fusion/0/refs at 60, 120 and 300 s for
+# DirectFB objects whose owner is dead and names the owner from that list.
+PROCLOG=$V/boot-procs.log
+proc_line() {   # $1 pid: sets pl to "pid ppid uid name argv0", or empty
+    pl=""; local nm="" pp="" ui="" k v a0=""
+    while read -r k v; do
+        case $k in
+        Name:) nm=$v ;; PPid:) pp=$v ;; Uid:) ui=${v%%[!0-9]*}; break ;;
+        esac
+    done 2>/dev/null < /proc/$1/status
+    [ -n "$nm" ] || return
+    read -r -d '' a0 2>/dev/null < /proc/$1/cmdline
+    pl="$1 $pp $ui $nm ${a0:--}"
+}
+fusion_check() {
+    local line o
+    [ -r /proc/fusion/0/refs ] || return
+    while read -r line; do
+        o=${line#*(}; o=${o%%)*}; o=${o// /}
+        case $o in (''|*[!0-9]*) continue ;; esac
+        [ -d /proc/$o ] && continue
+        # the world's master (app_man, stopped on purpose) keeps its layer
+        # objects and one screen surface: normal. Only surfaces and windows
+        # are of interest.
+        case $line in (*Surface*|*Window*) ;; (*) continue ;; esac
+        echo "uptime $(up) fusion object of dead pid $o: ${line#*) }  [$(grep "^$o " $PROCLOG | $BB head -n 1)]"
+    done < /proc/fusion/0/refs
+}
+proc_watch() {
+    local seen=" " pid u
+    echo "# pid ppid uid name argv0 (first seen at uptime)" > $PROCLOG
+    while :; do
+        u=$(up)
+        for p in /proc/[0-9]*; do
+            pid=${p#/proc/}
+            case "$seen" in *" $pid "*) continue ;; esac
+            proc_line $pid
+            [ -n "$pl" ] || continue
+            seen="$seen$pid "
+            echo "$pl @$u" >> $PROCLOG
+        done
+        u=${u%.*}
+        [ "$u" -ge 60 ] && break
+        sleep 1
+    done
+    for t in 60 120 300; do
+        u=$(up); u=${u%.*}
+        [ "$u" -lt $t ] && sleep $((t - u))
+        echo "uptime $(up) fusion check" >> $PROCLOG
+        fusion_check >> $PROCLOG
+    done
+}
+
 if off; then echo "debloat.off present, not running"; fw_remove; exit 0; fi
+proc_watch &
 # the filter-table chain of the first version, if a run left one
 while iptables -D OUTPUT -j VIBE_OUT 2>/dev/null; do :; done
 iptables -F VIBE_OUT 2>/dev/null; iptables -X VIBE_OUT 2>/dev/null
