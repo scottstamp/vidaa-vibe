@@ -239,6 +239,28 @@ static void request_av(void)
      }
 }
 
+/* HMPSetDisplayRect takes panel pixels (3840x2160 here: a 1920x1080 rect
+ * filled the top-left quarter); our rects are in UI pixels, 1920x1080 */
+static int panel_w = 3840, panel_h = 2160;
+
+static void read_panel(void)
+{
+     static char s[BIZ_STR_MAX];
+     int w, h;
+     if (model() && biz_get_str("kilby.sl2.str.video.panel.resolution.info", s) == 1 &&
+         sscanf(s, "%d*%d", &w, &h) == 2 && w >= 1280 && h >= 720) {
+          panel_w = w; panel_h = h;
+     }
+     say("note panel %dx%d", panel_w, panel_h);
+}
+
+static struct hmp_rect to_panel(struct hmp_rect r)
+{
+     r.v[0] = r.v[0] * panel_w / 1920; r.v[2] = r.v[2] * panel_w / 1920;
+     r.v[1] = r.v[1] * panel_h / 1080; r.v[3] = r.v[3] * panel_h / 1080;
+     return r;
+}
+
 static void *start_thread(void *arg)
 {
      request_av();
@@ -250,8 +272,9 @@ static void *start_thread(void *arg)
      pthread_mutex_unlock(&st_lock);
      clock_set(0, 1);
      /* the inject handle exists only once HMPStart has opened the decoders */
-     r = H.SetDisplayRect(player, rect, rect, 0);
-     say("rect %d -> %d", rect.v[2], r);
+     struct hmp_rect pr = to_panel(rect);
+     r = H.SetDisplayRect(player, pr, pr, 0);
+     say("rect %d -> %d", pr.v[2], r);
      if (r == 0) H.SetComponentMuteState(player, 2, 0);   /* unmute video (UNSURE: 2) */
      if (start_ms && start_seek) {
           r = H.Seek(player, start_ms);
@@ -408,6 +431,7 @@ int main(int argc, char **argv)
      if (sp) { *sp = 0; start_ms = strtoull(sp + 1, NULL, 10); }
      snprintf(url, sizeof url, "%s", line + 5);
      say("state opening");
+     read_panel();
      if (load() != 0 || open_url() != 0) { stop_player(); say("exit"); return 1; }
      pthread_t tk;
      pthread_create(&tk, NULL, ticker, NULL);
@@ -432,6 +456,7 @@ int main(int argc, char **argv)
           } else if (!strncmp(line, "rect ", 5)) {
                struct hmp_rect rc;
                if (sscanf(line + 5, "%d %d %d %d %d", &rc.v[0], &rc.v[1], &rc.v[2], &rc.v[3], &rc.v[4]) == 5) {
+                    rc = to_panel(rc);
                     r = H.SetDisplayRect(player, rc, rc, 0);
                     say("rect -> %d", r);
                }
