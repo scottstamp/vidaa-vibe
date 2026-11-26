@@ -57,12 +57,16 @@
 
 enum job_kind {
      JB_DISCOVER, JB_CONNECT, JB_QC_START, JB_QC_POLL, JB_HOME, JB_LIST,
-     JB_DETAIL, JB_PLAYINFO, JB_REPORT, JB_PLAYED, JB_LOGOUT, JB_STOP_TC, JB_SUBS
+     JB_DETAIL, JB_PLAYINFO, JB_REPORT, JB_PLAYED, JB_LOGOUT, JB_STOP_TC, JB_SUBS,
+     JB_FAVS, JB_SEARCH, JB_FAV
 };
 enum list_kind { LK_CHILDREN, LK_SEASONS, LK_EPISODES };
 #define LATEST_MAX 8                 /* "Latest ..." shelves: at most this many libraries */
 #define HOME_LISTS (3 + LATEST_MAX)
-enum { SH_MEDIA, SH_RESUME, SH_NEXT, SH_ACCOUNT, SH_LATEST, SH_KINDS = SH_LATEST + LATEST_MAX };
+enum { SH_MEDIA, SH_RESUME, SH_NEXT, SH_ACCOUNT, SH_LATEST,
+       SH_FAV = SH_LATEST + LATEST_MAX, SH_SRCH = SH_FAV + 3, SH_KINDS = SH_SRCH + 3 };
+/* Home's tabs, as the web client's header */
+enum { TAB_HOME, TAB_FAVS, TAB_SEARCH, NTABS };
 
 struct job {
      enum job_kind kind;
@@ -220,6 +224,23 @@ static void *worker(void *arg)
           case JB_PLAYED:
                r->rc = jf_set_played(&S, j.id, j.flag);
                break;
+          case JB_FAVS:                       /* movies, shows, episodes */
+               r->rc = jf_favorites(&S, "Movie", 48, &r->lists[0]);
+               if (r->rc == 0) {
+                    jf_favorites(&S, "Series", 48, &r->lists[1]);
+                    jf_favorites(&S, "Episode", 48, &r->lists[2]);
+               }
+               break;
+          case JB_SEARCH:
+               r->rc = jf_search(&S, j.arg, "Movie", 24, &r->lists[0]);
+               if (r->rc == 0) {
+                    jf_search(&S, j.arg, "Series", 24, &r->lists[1]);
+                    jf_search(&S, j.arg, "Episode", 24, &r->lists[2]);
+               }
+               break;
+          case JB_FAV:
+               r->rc = jf_set_favorite(&S, j.id, j.flag);
+               break;
           case JB_SUBS: {
                char *data = NULL;
                size_t len = 0;
@@ -267,7 +288,7 @@ struct level {                 /* one LIST screen */
      int  loading_more;
 };
 
-enum { A_PLAY, A_RESUME, A_RESTART, A_PLAYED, A_UNPLAYED, A_OPEN };
+enum { A_PLAY, A_RESUME, A_RESTART, A_PLAYED, A_UNPLAYED, A_OPEN, A_FAV, A_UNFAV };
 
 static struct {
      int  on, inited;
@@ -310,6 +331,13 @@ static struct {
      int  nsh, cur, vtop;        /* shelves, the focused one, the first shown
                                   * (grid: the first line shown) */
      int  hsel[SH_KINDS], hscroll[SH_KINDS], hcur, hvtop;   /* Home's, kept by SH_* kind */
+     /* Home's tabs: Home, Favourites, Search; focus on the tab bar; the
+      * search keyboard */
+     int  tab, tab_focus, kb_focus, kb_r, kb_c;
+     struct jf_list fav[3], srch[3];          /* movies, shows, episodes */
+     char query[64];
+     double query_at;                         /* search this long after the last key */
+     int  srch_gen, srch_done;
 
      /* playback */
      pid_t pid;
@@ -462,11 +490,13 @@ static int first_selectable(int from, int dir)
 #define C_TEXT   78                 /* two lines under a card */
 #define SH_GAP   24
 
+#define SR_X     640                /* search results: right of the keyboard */
+static int cards_x0(void) { return U.scr == J_HOME && U.tab == TAB_SEARCH ? SR_X : C_X0; }
 static int card_w(const struct shelf *h) { return h->land ? L_W : P_W; }
 static int card_h(const struct shelf *h) { return h->land ? L_H : P_H; }
 static int per_line(const struct shelf *h)
 {
-     return (1920 - 2 * C_X0 + C_GAP) / (card_w(h) + C_GAP);
+     return (1920 - cards_x0() - C_X0 + C_GAP) / (card_w(h) + C_GAP);
 }
 static int shelf_h(const struct shelf *h) { return SH_TITLE + card_h(h) + C_TEXT + SH_GAP; }
 static int grid_line_h(const struct shelf *h) { return card_h(h) + C_TEXT + 16; }
@@ -516,7 +546,20 @@ static void add_shelf(int kind, const char *title, struct jf_item *items, int n,
 static void build_cards(void)
 {
      U.nsh = 0;
-     if (U.scr == J_HOME) {
+     if (U.scr == J_HOME && U.tab != TAB_HOME) {
+          static const char *const T[3] = { "Movies", "Shows", "Episodes" };
+          struct jf_list *l = U.tab == TAB_FAVS ? U.fav : U.srch;
+          int base = U.tab == TAB_FAVS ? SH_FAV : SH_SRCH;
+          for (int s = 0; s < 3; s++)
+               if (l[s].n) add_shelf(base + s, T[s], l[s].items, l[s].n, s == 2, 0);
+          for (int i = 0; i < U.nsh; i++) {
+               struct shelf *h = &U.sh[i];
+               h->sel = U.hsel[h->kind] < h->n ? U.hsel[h->kind] : 0;
+               h->scroll = U.hscroll[h->kind] <= h->sel ? U.hscroll[h->kind] : h->sel;
+          }
+          if (U.cur >= U.nsh) U.cur = 0;
+          if (U.vtop > U.cur) U.vtop = U.cur;
+     } else if (U.scr == J_HOME) {
           if (U.home[2].n) add_shelf(SH_MEDIA, "My Media", U.home[2].items, U.home[2].n, 1, 0);
           if (U.home[0].n) add_shelf(SH_RESUME, "Continue Watching", U.home[0].items, U.home[0].n, 1, 0);
           if (U.home[1].n) add_shelf(SH_NEXT, "Next Up", U.home[1].items, U.home[1].n, 1, 0);
@@ -558,8 +601,7 @@ static void save_cards(void)
                U.hsel[U.sh[i].kind] = U.sh[i].sel;
                U.hscroll[U.sh[i].kind] = U.sh[i].scroll;
           }
-          if (U.nsh) U.hcur = U.sh[U.cur].kind;
-          U.hvtop = U.vtop;
+          if (U.nsh && U.tab == TAB_HOME) { U.hcur = U.sh[U.cur].kind; U.hvtop = U.vtop; }
      } else if (U.scr == J_LIST && U.depth > 0 && U.nsh) {
           U.lv[U.depth - 1].sel = U.sh[0].sel;
           U.lv[U.depth - 1].top = U.vtop;
@@ -615,6 +657,8 @@ static void build_rows(void)
           }
           if (playable) add_row(0, it->played ? "Mark unwatched" : "Mark watched", it,
                                 it->played ? A_UNPLAYED : A_PLAYED);
+          if (playable) add_row(0, it->favorite ? "Unfavourite" : "Favourite", it,
+                                it->favorite ? A_UNFAV : A_FAV);
           break;
      }
      case J_PLAYER:
@@ -1193,6 +1237,17 @@ static void apply(struct result *r, double now)
                U.dirty = 1;
           }
           break;
+     case JB_FAVS:
+          for (int s = 0; s < 3; s++) { jf_list_free(&U.fav[s]); U.fav[s] = r->lists[s]; r->lists[s] = (struct jf_list){ 0 }; }
+          if (U.scr == J_HOME && U.tab == TAB_FAVS) build_rows();
+          break;
+     case JB_SEARCH:
+          if (r->start != U.srch_gen) break;      /* an older query */
+          for (int s = 0; s < 3; s++) { jf_list_free(&U.srch[s]); U.srch[s] = r->lists[s]; r->lists[s] = (struct jf_list){ 0 }; }
+          U.srch_done = 1;
+          if (U.scr == J_HOME && U.tab == TAB_SEARCH) { U.cur = 0; U.vtop = 0; build_rows(); }
+          break;
+     case JB_FAV:
      case JB_PLAYED:
           if (U.have_detail) {
                struct job d = { .kind = JB_DETAIL };
@@ -1203,6 +1258,9 @@ static void apply(struct result *r, double now)
      case JB_LOGOUT:
           U.signed_in = 0;
           for (int s = 0; s < HOME_LISTS; s++) jf_list_free(&U.home[s]);
+          for (int s = 0; s < 3; s++) { jf_list_free(&U.fav[s]); jf_list_free(&U.srch[s]); }
+          U.tab = TAB_HOME;
+          U.tab_focus = 0;
           go(J_SERVERS, 0);
           {
                struct job j = { .kind = JB_DISCOVER };
@@ -1267,6 +1325,20 @@ int jfui_tick(double now)
           else if (U.osd_until > now && now >= U.next_redraw) { U.next_redraw = now + 1; U.dirty = 1; }
      }
      if (U.err_until && now >= U.err_until) { U.err_until = 0; U.dirty = 1; }
+     if (U.on && U.scr == J_HOME && U.tab == TAB_SEARCH && U.query_at && now >= U.query_at) {
+          U.query_at = 0;
+          U.srch_gen++;
+          if (strlen(U.query) >= 2) {
+               struct job j = { .kind = JB_SEARCH, .start = U.srch_gen, .gen = U.gen };
+               snprintf(j.arg, sizeof j.arg, "%s", U.query);
+               post(j);
+          } else {
+               for (int s = 0; s < 3; s++) jf_list_free(&U.srch[s]);
+               U.srch_done = 0;
+               build_rows();
+          }
+          U.dirty = 1;
+     }
      if (jfimg_changed() && (card_screen() || U.scr == J_DETAIL || (U.scr == J_PLAYER && U.pstate == 0)))
           U.dirty = 1;
      int d = U.dirty;
@@ -1497,8 +1569,111 @@ static void more_if_needed(void)
      }
 }
 
+/* ---- Home's tabs and the search keyboard */
+
+/* keyboard: 6 x 6 characters, then Space, Delete, Clear (2 columns each) */
+static const char *const kb_rows[6] = { "abcdef", "ghijkl", "mnopqr", "stuvwx", "yz0123", "456789" };
+static const char *const kb_acts[3] = { "Space", "Delete", "Clear" };
+#define KB_X  C_X0
+#define KB_KW 70
+#define KB_KH 62
+#define KB_G  8
+#define KB_Y  (C_TOP + 96)
+
+static void set_tab(int t)
+{
+     if (t == U.tab) return;
+     save_cards();
+     U.tab = t;
+     U.cur = 0;
+     U.vtop = 0;
+     if (t == TAB_FAVS) {
+          struct job j = { .kind = JB_FAVS };
+          post_browse(j, "Loading\xe2\x80\xa6");
+     }
+     if (t == TAB_SEARCH) U.kb_focus = 1;
+     build_rows();
+     U.dirty = 1;
+}
+
+static int tab_key(int k, int repeat, double now)
+{
+     switch (k) {
+     case DIKS_CURSOR_LEFT:  if (U.tab > 0) set_tab(U.tab - 1); break;
+     case DIKS_CURSOR_RIGHT: if (U.tab < NTABS - 1) set_tab(U.tab + 1); break;
+     case DIKS_CURSOR_DOWN: case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
+          if (repeat) return 1;
+          if (U.tab == TAB_SEARCH) { U.tab_focus = 0; U.kb_focus = 1; }
+          else if (U.nsh) U.tab_focus = 0;
+          break;
+     case DIKS_BACK: case DIKS_EXIT:
+          if (repeat) return 1;
+          if (U.tab != TAB_HOME) { set_tab(TAB_HOME); return 1; }
+          return key_back(now);
+     default:
+          return 1;
+     }
+     U.dirty = 1;
+     return 1;
+}
+
+static void kb_type(int r, int c, double now)
+{
+     size_t l = strlen(U.query);
+     if (r < 6) {
+          if (l + 1 < sizeof U.query) { U.query[l] = kb_rows[r][c]; U.query[l + 1] = 0; }
+     } else switch (c / 2) {
+     case 0: if (l && l + 1 < sizeof U.query && U.query[l - 1] != ' ') { U.query[l] = ' '; U.query[l + 1] = 0; } break;
+     case 1: if (l) U.query[l - 1] = 0; break;
+     case 2: U.query[0] = 0; break;
+     }
+     U.query_at = now + 0.6;               /* search once typing pauses */
+}
+
+static int kb_key(int k, int repeat, double now)
+{
+     switch (k) {
+     case DIKS_CURSOR_UP:
+          if (U.kb_r == 0) U.tab_focus = 1;
+          else U.kb_r--;
+          break;
+     case DIKS_CURSOR_DOWN: if (U.kb_r < 6) U.kb_r++; if (U.kb_r == 6) U.kb_c -= U.kb_c % 2; break;
+     case DIKS_CURSOR_LEFT:
+          if (U.kb_c > 0) U.kb_c -= U.kb_r == 6 ? 2 : 1;
+          break;
+     case DIKS_CURSOR_RIGHT:
+          if (U.kb_c < (U.kb_r == 6 ? 4 : 5)) U.kb_c += U.kb_r == 6 ? 2 : 1;
+          else if (U.nsh) U.kb_focus = 0;          /* into the results */
+          break;
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
+          kb_type(U.kb_r, U.kb_c, now);
+          break;
+     case DIKS_BACK: case DIKS_EXIT:
+          if (repeat) return 1;
+          set_tab(TAB_HOME);
+          U.tab_focus = 1;
+          break;
+     default:
+          return 1;
+     }
+     U.dirty = 1;
+     return 1;
+}
+
 static int card_key(int k, int repeat, double now)
 {
+     if (U.scr == J_HOME) {
+          if (U.tab_focus) return tab_key(k, repeat, now);
+          if (U.tab == TAB_SEARCH && (U.kb_focus || !U.nsh)) return kb_key(k, repeat, now);
+          if (U.tab != TAB_HOME && (k == DIKS_BACK || k == DIKS_EXIT)) {
+               if (!repeat) { set_tab(TAB_HOME); U.tab_focus = 1; }
+               return 1;
+          }
+          if (k == DIKS_CURSOR_UP && (!U.nsh || U.cur == 0)) { U.tab_focus = 1; U.dirty = 1; return 1; }
+          if (k == DIKS_CURSOR_LEFT && U.tab == TAB_SEARCH && U.nsh && U.sh[U.cur].sel == 0) {
+               U.kb_focus = 1; U.dirty = 1; return 1;
+          }
+     }
      if (!U.nsh) return k == DIKS_BACK || k == DIKS_EXIT ? key_back(now) : 1;
      struct shelf *h = &U.sh[U.cur];
      int step = 0;
@@ -1606,6 +1781,13 @@ int jfui_key(int k, int repeat, double now)
                struct jf_item t = *r->it;
                t.position_ticks = 0;
                start_playback(&t, 0, now);
+               break;
+          }
+          case A_FAV: case A_UNFAV: {
+               struct job j = { .kind = JB_FAV, .flag = r->action == A_FAV };
+               snprintf(j.id, sizeof j.id, "%s", r->it->id);
+               post_browse(j, "");
+               U.busy = 0;
                break;
           }
           case A_PLAYED: case A_UNPLAYED: {
@@ -1798,7 +1980,7 @@ static void draw_cards(struct canvas *c)
                for (int k = 0; k < pl; k++) {
                     int i = l * pl + k;
                     if (i >= g->n) break;
-                    draw_card(c, g, i, C_X0 + k * (card_w(g) + C_GAP), C_TOP + (l - U.vtop) * lh, i == g->sel);
+                    draw_card(c, g, i, cards_x0() + k * (card_w(g) + C_GAP), C_TOP + (l - U.vtop) * lh, i == g->sel);
                }
           if (!c && g->n > 0) {
                char pos[32];
@@ -1808,16 +1990,17 @@ static void draw_cards(struct canvas *c)
           }
           return;
      }
-     int y = C_TOP;
+     int y = C_TOP, x0 = cards_x0();
+     int cards_have_focus = !(U.scr == J_HOME && (U.tab_focus || (U.tab == TAB_SEARCH && U.kb_focus)));
      for (int si = U.vtop; si < U.nsh; si++) {
           struct shelf *h = &U.sh[si];
           if (y + shelf_h(h) - SH_GAP > C_BOT) break;
-          if (!c) text(U.h.f_bold, C_X0, y, SH_TITLE - 16, si == U.cur ? K_TEXT : K_TEXT2, h->title, -1);
+          if (!c) text(U.h.f_bold, x0, y, SH_TITLE - 16, si == U.cur && cards_have_focus ? K_TEXT : K_TEXT2, h->title, -1);
           int cy = y + SH_TITLE;
           for (int i = h->scroll; i < h->n; i++) {
-               int x = C_X0 + (i - h->scroll) * (card_w(h) + C_GAP);
+               int x = x0 + (i - h->scroll) * (card_w(h) + C_GAP);
                if (x >= 1920) break;
-               draw_card(c, h, i, x, cy, si == U.cur && i == h->sel);
+               draw_card(c, h, i, x, cy, cards_have_focus && si == U.cur && i == h->sel);
           }
           y += shelf_h(h);
      }
@@ -2137,6 +2320,66 @@ static void draw_detail(struct canvas *c, double now)
      (void)now;
 }
 
+/* Home's tab bar (top centre) and, on Search, the field and keyboard;
+ * the empty states */
+static void draw_home_extras(struct canvas *c)
+{
+     static const char *const names[NTABS] = { "Home", "Favourites", "Search" };
+     int W = U.h.W, w[NTABS], tw = 0, gap = 56;
+     for (int t = 0; t < NTABS; t++) {
+          w[t] = (int)strlen(names[t]) * 20;
+          if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, names[t], -1, &w[t]);
+          tw += w[t] + (t ? gap : 0);
+     }
+     int x = (W - tw) / 2;
+     for (int t = 0; t < NTABS; t++) {
+          int sel = t == U.tab, foc = sel && U.tab_focus;
+          if (c) {
+               if (foc) gfx_rrect(c, x - 24, 30, w[t] + 48, 58, 29, 0xffffffff);
+               else if (sel) gfx_rrect(c, x, 82, w[t], 4, 2, K_ACCENT_L);
+          } else {
+               text(U.h.f_bold, x, 24, 70, foc ? 0xff0b0e16 : sel ? K_TEXT : K_TEXT2, names[t], -1);
+          }
+          x += w[t] + gap;
+     }
+     if (U.tab == TAB_SEARCH) {
+          int fw = 6 * KB_KW + 5 * KB_G;
+          int kbf = U.kb_focus && !U.tab_focus;
+          if (c) {
+               gfx_rrect(c, KB_X, C_TOP, fw, 72, 16, K_CARD);
+               gfx_rrect_outline(c, KB_X, C_TOP, fw, 72, 16, 1, K_PANEL_EDGE);
+          } else {
+               char q[80], ft[96];
+               snprintf(q, sizeof q, "%s", U.query[0] ? U.query : "Search");
+               fit(U.h.f_item, q, fw - 40, ft, sizeof ft);
+               text(U.h.f_item, KB_X + 20, C_TOP, 72, U.query[0] ? K_TEXT : K_TEXT3, ft, -1);
+          }
+          for (int r = 0; r < 7; r++) {
+               int ncol = r < 6 ? 6 : 3;
+               for (int k = 0; k < ncol; k++) {
+                    int col = r < 6 ? k : k * 2;
+                    int kw = r < 6 ? KB_KW : 2 * KB_KW + KB_G;
+                    int kx = KB_X + col * (KB_KW + KB_G), ky = KB_Y + r * (KB_KH + KB_G);
+                    int f = kbf && U.kb_r == r && (r < 6 ? U.kb_c == col : U.kb_c / 2 == k);
+                    if (c) gfx_rrect(c, kx, ky, kw, KB_KH, 12, f ? 0xffffffff : 0x26ffffff);
+                    else {
+                         char ch[2] = { r < 6 ? kb_rows[r][k] : 0, 0 };
+                         text(r < 6 ? U.h.f_item : U.h.f_small, kx + kw / 2, ky, KB_KH, f ? 0xff0b0e16 : K_TEXT,
+                              r < 6 ? ch : kb_acts[k], 0);
+                    }
+               }
+          }
+          if (!c && !U.nsh) {
+               const char *msg = !U.query[0] || strlen(U.query) < 2 ? "Type to search movies, shows and episodes"
+                               : U.srch_done && !U.query_at ? "Nothing found" : "";
+               if (msg[0]) text(U.h.f_item, SR_X, C_TOP, 72, K_TEXT2, msg, -1);
+          }
+     } else if (U.tab == TAB_FAVS && !c && !U.nsh && !U.busy) {
+          text(U.h.f_item, C_X0, C_TOP, 72, K_TEXT2,
+               "No favourites yet: choose Favourite on a film or an episode", -1);
+     }
+}
+
 void jfui_draw(struct canvas *c, double now)
 {
      if (!U.on) return;
@@ -2217,11 +2460,14 @@ void jfui_draw(struct canvas *c, double now)
           }
           y0 = 480;
      }
+     if (U.scr == J_HOME) draw_home_extras(c);
      if (card_screen()) draw_cards(c);
      else draw_rows(c, y0, y1);
-     /* messages top centre, between the title and the account name */
-     if (!c && U.err_until > now) text(U.h.f_item, W / 2, 24, 70, 0xffff8080, U.err, 0);
-     else if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W / 2, 24, 70, K_TEXT2, U.busy_msg, 0);
+     /* messages top centre (under the tabs on Home) */
+     int my = U.scr == J_HOME ? 74 : 24, mh = U.scr == J_HOME ? 34 : 70;
+     IDirectFBFont *mf = U.scr == J_HOME ? U.h.f_small : U.h.f_item;
+     if (!c && U.err_until > now) text(mf, W / 2, my, mh, 0xffff8080, U.err, 0);
+     else if (!c && U.busy && U.busy_msg[0]) text(mf, W / 2, my, mh, K_TEXT2, U.busy_msg, 0);
      static const char *const hs[] = { "ARROWS", "Move", "OK", "Select", "BACK", "Back" };
      U.h.hints(U.h.ctx, c, W / 2, H - 56, hs, 3);
 }

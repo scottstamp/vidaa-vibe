@@ -49,6 +49,7 @@ struct jf_item {
      int64_t runtime_ticks;   /* 10,000,000 ticks per second */
      int64_t position_ticks;  /* UserData.PlaybackPositionTicks */
      int  played;
+     int  favorite;           /* UserData.IsFavorite */
      int  unplayed;           /* UserData.UnplayedItemCount (series, seasons) */
      int  child_count;
      float rating;            /* CommunityRating; 0 if none */
@@ -155,6 +156,12 @@ int  jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
 int  jf_report(struct jf_session *s, const char *item_id, const struct jf_play *p,
                int event, int64_t position_ticks, int paused);
 int  jf_set_played(struct jf_session *s, const char *item_id, int played);
+int  jf_set_favorite(struct jf_session *s, const char *item_id, int favorite);
+/* the user's favourites of some types ("Movie", "Series", "Episode"...) */
+int  jf_favorites(struct jf_session *s, const char *types, int limit, struct jf_list *out);
+/* search by name in some types */
+int  jf_search(struct jf_session *s, const char *term, const char *types, int limit,
+               struct jf_list *out);
 /* a text subtitle track of the playing source, converted to SRT by the
  * server (embedded or sidecar alike); caller frees *data */
 int  jf_subtitle(struct jf_session *s, const char *item_id, const char *media_source_id,

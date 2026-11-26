@@ -626,3 +626,20 @@ web client's home: posters for movies, shows and collections, 16:9 cards
 for other libraries (home videos). A lone new episode in "Latest Shows"
 shows its series' poster. Checked off-screen: Latest Shows, Latest Movies,
 Latest Home Videos.
+
+### Favourites and search (2026-11-26)
+
+Home has the web client's tabs at the top: **Home, Favourites, Search**.
+UP from the first shelf reaches the tab bar, LEFT/RIGHT switch tabs, DOWN
+goes back in, and BACK on another tab returns to Home.
+- Favourites: rows of favourite Movies, Shows and Episodes
+  (`/Items?filters=IsFavorite&recursive=true&includeItemTypes=…`). A
+  "Favourite"/"Unfavourite" button on the detail page uses `POST/DELETE
+  /UserFavoriteItems/{id}?userId=` (the server's newer per-user route;
+  not yet run against the server). `UserData.IsFavorite` is now parsed.
+- Search: a 6x6 a–z/0–9 keyboard with Space/Delete/Clear on the left;
+  results (Movies, Shows, Episodes; `searchTerm=`, 24 each) to its right,
+  0.6 s after typing stops (2+ characters). Results from an older query
+  are dropped. LEFT from the first result goes back to the keyboard.
+Checked off-screen: one favourite listed; "dark" gave Dark Matter (show)
+and four episodes.

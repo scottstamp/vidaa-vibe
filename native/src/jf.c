@@ -354,6 +354,7 @@ static void parse_item(const cJSON *o, struct jf_item *it)
      if (ud) {
           it->position_ticks = (int64_t)jnum(ud, "PlaybackPositionTicks", 0);
           it->played = jbool(ud, "Played");
+          it->favorite = jbool(ud, "IsFavorite");
           it->unplayed = (int)jnum(ud, "UnplayedItemCount", 0);
      }
      const cJSON *tags = cJSON_GetObjectItemCaseSensitive(o, "ImageTags");
@@ -655,6 +656,33 @@ int jf_report(struct jf_session *s, const char *item_id, const struct jf_play *p
      if (!j) return -1;
      cJSON_Delete(j);
      return 0;
+}
+
+int jf_set_favorite(struct jf_session *s, const char *item_id, int favorite)
+{
+     char path[256];
+     snprintf(path, sizeof path, "/UserFavoriteItems/%s?userId=%s", item_id, s->user_id);
+     cJSON *j = call(s, favorite ? "POST" : "DELETE", path, NULL, NULL);
+     if (!j) return -1;
+     cJSON_Delete(j);
+     return 0;
+}
+
+int jf_favorites(struct jf_session *s, const char *types, int limit, struct jf_list *out)
+{
+     return get_list(s, out, "/Items?userId=%s&filters=IsFavorite&recursive=true&includeItemTypes=%s"
+                     "&limit=%d&sortBy=SortName&sortOrder=Ascending"
+                     "&enableImageTypes=Primary,Backdrop,Thumb&fields=" ITEM_FIELDS,
+                     s->user_id, types, limit);
+}
+
+int jf_search(struct jf_session *s, const char *term, const char *types, int limit,
+              struct jf_list *out)
+{
+     char esc[256];
+     return get_list(s, out, "/Items?userId=%s&searchTerm=%s&recursive=true&includeItemTypes=%s"
+                     "&limit=%d&enableImageTypes=Primary,Backdrop,Thumb&fields=" ITEM_FIELDS,
+                     s->user_id, http_escape(term, esc, sizeof esc), types, limit);
 }
 
 int jf_set_played(struct jf_session *s, const char *item_id, int played)
