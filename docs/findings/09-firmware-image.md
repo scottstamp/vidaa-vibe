@@ -75,5 +75,36 @@ It is a full factory image, not an update:
   TV re-creates afterwards is unknown. `demura` (panel uniformity data) is
   not written.
 
-Not done: flashing, and backing up the unit partitions first (the obvious
-step before ever using this image).
+## Bootloader pieces and the brick question
+
+- The image's eMMC boot-area stage (`mmc write.boot 1`, 188,416 bytes) is
+  **byte-identical** to the start of the TV's `mmcblk0boot0`: that write
+  changes nothing.
+- The TV's `MBOOT` (p1) is U-Boot built **Feb 06 2023**; its `MBOOTBAK`
+  (p3) and the image's `MBOOT`/`MBOOTBAK` are built **Sep 07 2023**. The
+  flash would replace p1 with the newer build.
+- Order in the script: partition table removed and re-created, `saveenv`,
+  `MBOOT` erased and written, then `MBOOTBAK`, then the boot area, then
+  everything else. `MstarUpgrade_complete=1` is set only at the very end.
+- Inferred, untested: a power cut after `MBOOT` is written leaves a working
+  bootloader with the USB path, so the flash can be run again. The short
+  windows that could leave nothing bootable are the table rewrite and the
+  `MBOOT` erase/write (seconds). Whether the first stage falls back to
+  `MBOOTBAK` when `MBOOT` is bad, and whether MBOOT restarts an unfinished
+  USB flash by itself, were not traced.
+
+## Backup of the unit partitions (2026-11-26)
+
+`research/unit-backup/2026-11-26/` (gitignored), raw `dd` reads, each
+md5-checked against the TV: `MBOOT`, `MPOOL` (env), `MBOOTBAK`,
+`bootflag`, `eeprom_a`, `acfg`, `certificate`, `specific`, `basic`,
+`tvconfig`, `data`, `bootinfo`, `devinfo`, `demura`, `criticaldata`,
+`factorydata`, `servicedata`, `modeldata`, `serialdata`; the first and last
+MiB of `mmcblk0` (partition table and its backup); `mmcblk0boot0/1`; and
+`/var/local` as a tar (mounted rw, so file-level). Script:
+`research/bk-pull.sh`. Not backed up: the system partitions (in the
+image), `hsaps` (`/APPS`), `cache`, `OAD`. Restoring any of it means
+writing raw eMMC, which AGENTS.md forbids on the running TV; it is meant
+for after a factory flash, with its own written way back.
+
+Not done: flashing.
