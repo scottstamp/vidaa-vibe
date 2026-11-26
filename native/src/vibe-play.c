@@ -83,6 +83,9 @@ static struct {
 /* ---- output ------------------------------------------------------------- */
 
 static pthread_mutex_t out_lock = PTHREAD_MUTEX_INITIALIZER;
+/* the protocol stream: our stdout as we got it. fd 1 itself is pointed at
+ * stderr, because the vendor libraries printf to stdout */
+static FILE *proto;
 
 static void say(const char *fmt, ...)
 {
@@ -99,7 +102,7 @@ static void say(const char *fmt, ...)
 /* ---- state -------------------------------------------------------------- */
 
 static hmp_t player;
-static int data_type = 3, do_init, uri_word = 0, mime_word = 4, app_type = 3, kind = 32, start_seek = 1;
+static int aout_init = 1, data_type = 3, do_init, uri_word = 0, mime_word = 4, app_type = 3, kind = 32, start_seek = 1;
 static const char *mime;
 static struct hmp_rect rect = { { 0, 0, 1920, 1080, 0 } };
 static char url[4096];
@@ -174,6 +177,19 @@ static int load(void)
      else say("note no cspDebugInit");
      H.lib = dlopen("/usr/local/lib/libhmplayer.so", RTLD_NOW | RTLD_GLOBAL);
      if (!H.lib) { say("error dlopen: %s", dlerror()); return -1; }
+     /* HUI_StreamInjectOpen opens an audio-output handle for every stream
+      * (audio and video) and fails if this process never initialised the
+      * MI audio-output module; nothing on the HMP path does (tvmain does it
+      * in its own process). Zeroed 1-byte params, as tvmain passes; 0 or 2
+      * (already initialised) is success. --no-aout-init skips it. */
+     if (aout_init) {
+          void *mi = dlopen("libmi.so", RTLD_NOW | RTLD_GLOBAL);
+          int (*aout)(void *) = mi ? (int (*)(void *))dlsym(mi, "MI_AOUT_Init") : NULL;
+          if (aout) {
+               uint8_t a = 0;
+               say("note MI_AOUT_Init -> %d", aout(&a));
+          } else say("note no MI_AOUT_Init");
+     }
 #define SYM(f) if (!(*(void **)&H.f = dlsym(H.lib, "HMP" #f))) { say("error no HMP%s", #f); return -1; }
      SYM(Init); SYM(Create); SYM(RegisterCallback); SYM(UnRegisterCallback); SYM(SetURI);
      SYM(Prepare); SYM(Start); SYM(Pause); SYM(Resume); SYM(Seek); SYM(Stop); SYM(Destroy);
@@ -193,6 +209,10 @@ static void *start_thread(void *arg)
      started = playing = 1;
      pthread_mutex_unlock(&st_lock);
      clock_set(0, 1);
+     /* the inject handle exists only once HMPStart has opened the decoders */
+     r = H.SetDisplayRect(player, rect, rect, 0);
+     say("rect %d -> %d", rect.v[2], r);
+     if (r == 0) H.SetComponentMuteState(player, 2, 0);   /* unmute video (UNSURE: 2) */
      if (start_ms && start_seek) {
           r = H.Seek(player, start_ms);
           say("seek %llu -> %d", (unsigned long long)start_ms, r);
@@ -226,9 +246,6 @@ static int open_url(void)
      if ((r = H.Prepare(player)) != 0) { say("error HMPPrepare %d", r); return -1; }
      say("state prepared");
      H.SetSubtitleShowState(player, 0);          /* we draw subtitles */
-     r = H.SetDisplayRect(player, rect, rect, 0);
-     say("rect %d -> %d", rect.v[2], r);
-     if (r == 0) H.SetComponentMuteState(player, 2, 0);   /* unmute video (UNSURE: 2) */
      pthread_t t;
      pthread_create(&t, NULL, start_thread, NULL);
      pthread_detach(t);
@@ -303,6 +320,7 @@ int main(int argc, char **argv)
           else if (!strcmp(a, "--no-start-seek")) start_seek = 0;
           else if (!strcmp(a, "--probe")) probe = 1;
           else if (!strcmp(a, "--init")) do_init = 1;
+          else if (!strcmp(a, "--no-aout-init")) aout_init = 0;
           else if (!strncmp(a, "--rect=", 7))
                sscanf(a + 7, "%d,%d,%d,%d,%d", &rect.v[0], &rect.v[1], &rect.v[2], &rect.v[3], &rect.v[4]);
           else { fprintf(stderr, "vibe-play: unknown option %s\n", a); return 2; }
@@ -323,6 +341,13 @@ int main(int argc, char **argv)
      signal(SIGTERM, on_term);
      signal(SIGINT, on_term);
      setvbuf(stdin, NULL, _IOLBF, 0);
+     {
+          int pfd = dup(1);
+          if (pfd >= 0 && (proto = fdopen(pfd, "w")) != NULL) {
+               fcntl(pfd, F_SETFD, FD_CLOEXEC);
+               dup2(2, 1);
+          }
+     }
      if (probe) {
           int r = load();
           say(r == 0 ? "probe ok" : "probe failed");
