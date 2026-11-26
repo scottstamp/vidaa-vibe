@@ -403,3 +403,8 @@ HDMI3`, both calls returned 1, and the screen stayed black (video info
 DMP did nothing and the HDMI3 switch only ended that DMP session. A second
 DMP → HDMI3 brought the picture back. vibe-ui now switches to the input,
 waits 2 s, switches to DMP, waits 3 s, then switches to the input again.
+
+Third kill test (input → DMP → input, deployed build 48bf6e3): vibe-ui
+logged `player died (status 0x9), HDMI3 -> DMP -> HDMI3`, and about 12 s
+after the kill the video info read `4096,2160,60,0` (HDMI3 signal on the
+main window) with no manual step.
