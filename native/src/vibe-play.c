@@ -30,6 +30,9 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <sys/mount.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -51,7 +54,7 @@ struct hmp_create {          /* HMPCreate's param: 4 ints */
      int data_type;           /* 3 in the browser */
      int kind;                /* 32 = URL player (16 = MSE) */
 };
-struct hmp_uri { uintptr_t w[12]; };   /* by value; the URL in w[4] (UNSURE) */
+struct hmp_uri { uintptr_t w[12]; };   /* by value; URL in w[0], MIME type in w[4] (seen in the vendor log) */
 struct hmp_rect { int v[5]; };         /* by value; field order UNSURE */
 struct hmp_pts { uint64_t pts; int64_t b; int c; int pad[8]; };  /* UNSURE */
 
@@ -96,7 +99,7 @@ static void say(const char *fmt, ...)
 /* ---- state -------------------------------------------------------------- */
 
 static hmp_t player;
-static int uri_word = 4, mime_word = -1, app_type = 3, kind = 32, start_seek = 1;
+static int data_type = 3, do_init, uri_word = 0, mime_word = 4, app_type = 3, kind = 32, start_seek = 1;
 static const char *mime;
 static struct hmp_rect rect = { { 0, 0, 1920, 1080, 0 } };
 static char url[4096];
@@ -129,12 +132,47 @@ static void clock_set(double ms, int run)
 static void on_event(hmp_t h, int ev, void *extra)
 {
      say("event %d %ld", ev, (long)(intptr_t)extra);
+     uintptr_t x = (uintptr_t)extra;
+     if (getenv("VIBE_PLAY_DUMP") && x > 0x10000 && x < 0xc0000000u) {
+          const uint32_t *w = extra;
+          say("event-data %08x %08x %08x %08x %08x %08x %08x %08x",
+              w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+          for (int i = 0; i < 4; i++) {
+               uintptr_t q = w[i];
+               if (q > 0x10000 && q < 0xc0000000u) {
+                    const char *c = (const char *)q;
+                    char buf[64]; int n = 0;
+                    while (n < 63 && c[n] >= 32 && c[n] < 127) { buf[n] = c[n]; n++; }
+                    buf[n] = 0;
+                    if (n >= 3) say("event-str[%d] %s", i, buf);
+               }
+          }
+     }
 }
 
 static int load(void)
 {
+     /* libhmplayer needs dfbrc_client_* without naming the library that has
+      * them (the browser's backend loads it first). Without it the dlopen
+      * fails partway through relocation; a second dlopen then returns the
+      * half-relocated library and its first PLT call jumps to garbage. */
+     static const char *const pre[] = {
+          "libdirectfb-1.4.so.0", "/usr/local/lib/libdfb_renderclient.so",
+          /* libgsthsplayer (a GStreamer plugin) uses curl without linking it */
+          "libcurl.so.4",
+     };
+     for (size_t i = 0; i < sizeof pre / sizeof pre[0]; i++)
+          if (!dlopen(pre[i], RTLD_NOW | RTLD_GLOBAL)) {
+               say("error dlopen: %s", dlerror());
+               return -1;
+          }
+     /* the vendor debug-log library needs its one-time init before any
+      * library logs (libhmplayer does, in its static constructors) */
+     void *dbg = dlopen("libcsp-debug.so", RTLD_NOW | RTLD_GLOBAL);
+     void (*dbg_init)(void) = dbg ? (void (*)(void))dlsym(dbg, "cspDebugInit") : NULL;
+     if (dbg_init) dbg_init();
+     else say("note no cspDebugInit");
      H.lib = dlopen("/usr/local/lib/libhmplayer.so", RTLD_NOW | RTLD_GLOBAL);
-     if (!H.lib) H.lib = dlopen("libhmplayer.so", RTLD_NOW | RTLD_GLOBAL);
      if (!H.lib) { say("error dlopen: %s", dlerror()); return -1; }
 #define SYM(f) if (!(*(void **)&H.f = dlsym(H.lib, "HMP" #f))) { say("error no HMP%s", #f); return -1; }
      SYM(Init); SYM(Create); SYM(RegisterCallback); SYM(UnRegisterCallback); SYM(SetURI);
@@ -148,6 +186,7 @@ static int load(void)
  * discovery, and opens the decoders): its own thread */
 static void *start_thread(void *arg)
 {
+     say("trace start");
      int r = H.Start(player);
      if (r != 0) { say("error HMPStart %d", r); return NULL; }
      pthread_mutex_lock(&st_lock);
@@ -165,16 +204,25 @@ static void *start_thread(void *arg)
 
 static int open_url(void)
 {
-     struct hmp_create p = { 0, app_type, 3, kind };
+     struct hmp_create p = { 0, app_type, data_type, kind };
      int r;
-     if ((r = H.Init()) != 0) say("note HMPInit %d", r);
+     /* HMPInit only logs (the real init is lazy, in HMPCreate), and it
+      * crashed here outside the browser: skipped unless --init */
+     if (do_init) {
+          say("trace init");
+          if ((r = H.Init()) != 0) say("note HMPInit %d", r);
+     }
+     say("trace create");
      if ((r = H.Create(&p, &player)) != 0 || !player) { say("error HMPCreate %d", r); return -1; }
+     say("trace callback");
      H.RegisterCallback(player, on_event);
      struct hmp_uri u;
      memset(&u, 0, sizeof u);
      u.w[uri_word] = (uintptr_t)url;
      if (mime && mime_word >= 0 && mime_word < 12) u.w[mime_word] = (uintptr_t)mime;
+     say("trace seturi");
      if ((r = H.SetURI(player, u)) != 0) { say("error HMPSetURI %d", r); return -1; }
+     say("trace prepare");
      if ((r = H.Prepare(player)) != 0) { say("error HMPPrepare %d", r); return -1; }
      say("state prepared");
      H.SetSubtitleShowState(player, 0);          /* we draw subtitles */
@@ -229,7 +277,10 @@ static void ensure_env(char **argv)
      setenv("GST_PLUGIN_SCANNER", "/opt/mmlib/bin/gst-plugin-scanner", 1);
      /* private registry and cache: never the browser's, never root-owned
       * files in a place the UI user needs */
-     setenv("GST_REGISTRY", "/tmp/vibe-play-gstreg.bin", 1);
+     setenv("GST_REGISTRY", "/tmp/vibe-play-gstreg2.bin", 1);
+     /* scan plugins in this process, where libcurl is loaded: the separate
+      * scanner could not load libgsthsplayer and the registry kept that */
+     setenv("GST_REGISTRY_FORK", "no", 1);
      setenv("XDG_CACHE_HOME", "/tmp/vibe-play-cache", 1);
      execv("/proc/self/exe", argv);
      perror("vibe-play: re-exec");      /* go on without */
@@ -248,13 +299,25 @@ int main(int argc, char **argv)
           else if (!strncmp(a, "--mime-word=", 12)) mime_word = atoi(a + 12);
           else if (!strncmp(a, "--app-type=", 11)) app_type = atoi(a + 11);
           else if (!strncmp(a, "--kind=", 7)) kind = atoi(a + 7);
+          else if (!strncmp(a, "--data-type=", 12)) data_type = atoi(a + 12);
           else if (!strcmp(a, "--no-start-seek")) start_seek = 0;
           else if (!strcmp(a, "--probe")) probe = 1;
+          else if (!strcmp(a, "--init")) do_init = 1;
           else if (!strncmp(a, "--rect=", 7))
                sscanf(a + 7, "%d,%d,%d,%d,%d", &rect.v[0], &rect.v[1], &rect.v[2], &rect.v[3], &rect.v[4]);
           else { fprintf(stderr, "vibe-play: unknown option %s\n", a); return 2; }
      }
-     if (uri_word < 0 || uri_word > 11) uri_word = 4;
+     if (uri_word < 0 || uri_word > 11) uri_word = 0;
+     /* debug: the vendor libraries log to the fifo /var/log/console; give
+      * this process alone a private mount table with a file over it */
+     const char *vlog = getenv("VIBE_PLAY_VENDOR_LOG");
+     if (vlog) {
+          int fd = open(vlog, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+          if (fd >= 0) { if (user) { uid_t u = (uid_t)atoi(user); if (fchown(fd, u, u)) {} } close(fd); }
+          if (unshare(CLONE_NEWNS) != 0 || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
+              mount(vlog, "/var/log/console", NULL, MS_BIND, NULL) != 0)
+               fprintf(stderr, "vibe-play: vendor log: %s\n", strerror(errno));
+     }
      if (user && vibe_drop_privileges(user) != 0) return 1;
      signal(SIGPIPE, SIG_IGN);
      signal(SIGTERM, on_term);

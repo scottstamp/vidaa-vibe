@@ -189,3 +189,54 @@ Read from the disassembly of the browser's media backend
    and check that the resume point shows on the phone.
 6. Recovery: `kill -9` vibe-play mid-film, then switch to an HDMI input
    and check the picture comes back.
+
+## First runs on the TV (2026-11-26, owner at the screen)
+
+Measured with `vibe-play` run from SSH against a direct-play MKV (H.264 +
+AC-3 5.1) on "fin". The UI was not involved.
+
+Fixed, each seen in gdb (`/opt/bin/gdb` is on the TV) or in the vendor log:
+
+1. **`dlopen(libhmplayer.so)` failed partway** with `undefined symbol:
+   dfbrc_client_createsurface`; the old fallback `dlopen("libhmplayer.so")`
+   then returned the half-relocated library, and its first PLT call jumped
+   to `0x15ffc` (segfault in HMPInit/HMPCreate). The symbol is in
+   `/usr/local/lib/libdfb_renderclient.so`, which needs `DirectFBCreate`
+   (`libdirectfb-1.4.so.0`). vibe-play now loads both, RTLD_GLOBAL, first.
+2. **libcsp-debug needs `cspDebugInit()`** before any vendor library logs
+   (libhmplayer logs in its static constructors); without it,
+   `cspDebugCheckLevelGetFrameAndChunk` crashed. vibe-play calls it.
+3. **`libgsthsplayer.so` uses curl without linking it**: the separate
+   plugin scanner could not load it (`undefined symbol: curl_share_init`).
+   vibe-play loads `libcurl.so.4` RTLD_GLOBAL and sets
+   `GST_REGISTRY_FORK=no` (registry `/tmp/vibe-play-gstreg2.bin`).
+4. **`HMPUriPara_s`: URL in word 0, MIME type in word 4** (the vendor log
+   printed our URL as `m_mimeType` when it was in word 4). With
+   `video/x-matroska` the player reached "playing".
+5. `HMPInit` is skipped (it only logs); `--init` restores it.
+
+Vendor log: the libraries write to the fifo `/var/log/console` (config
+`/var/local/kilby/csp-debug-levels.cfg`, level ERR, read only, not changed).
+`VIBE_PLAY_VENDOR_LOG=/tmp/file` makes vibe-play (as root, before dropping
+privileges) unshare its mount namespace and bind-mount that file over the
+fifo, for its own process only. Do not `tail` `/var/log/console`: it blocks.
+
+Event numbers seen: 513 (x2) and 260, 256 after Start; 15, 19 while
+playing; 12 at stop; 259 = error (`HSPEvent ERROR`).
+
+**Still failing: no picture, no sound (owner: black screen).** The player
+went through prepare/start/pause/resume/seek/stop and every call returned
+0, but the vendor log shows
+
+    HUI_StreamInjectOpen for audio Failed! eInputType=0,ePlayer=0,eDataType=0
+    HUI_StreamInjectOpen for video Failed! ...
+    Appending data failed! ... result=1
+    HUI_StreamInjectSetDisplayRect Failed! windowRect[0, 0, 1920, 1080, 0]
+
+The same as root, so not permissions. Also seen at MI_MM_Init:
+`LoadMmap: Class "mstar.MI.MmService" failed to MsOS_PA2KSEG(PA =
+0x14d00000)`. Unknown: whether the stream injector needs the TV switched
+off HDMI to its media source first (the browser's launch path probably does
+this through tvmain/kilby; not found yet), or the MI mmap failure is the
+cause. `HMPGetPts` returns 0; after a seek its first word is the seek
+target.
