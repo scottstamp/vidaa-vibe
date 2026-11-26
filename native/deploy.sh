@@ -17,6 +17,12 @@ done
 for f in vibe-run.sh boot.sh hook-patch.sh powermon.sh restart-ui.sh debloat.sh cecmon.sh early.sh early-prepare.sh; do
     $SSH "cat > /var/local/vibe/$f.new && chmod 755 /var/local/vibe/$f.new && mv /var/local/vibe/$f.new /var/local/vibe/$f" < tv/$f
 done
+# fonts (Noto Sans, OFL): vibe-ui falls back to the stock Roboto without them
+$SSH 'mkdir -p /var/local/vibe/fonts && chmod 755 /var/local/vibe/fonts'
+for f in fonts/*.ttf; do
+    n=$(basename "$f")
+    $SSH "cat > /var/local/vibe/fonts/$n.new && chmod 644 /var/local/vibe/fonts/$n.new && mv /var/local/vibe/fonts/$n.new /var/local/vibe/fonts/$n" < "$f"
+done
 $SSH 'sync'
 $SSH 'ls -la /var/local/vibe; md5sum /var/local/vibe/vibe /var/local/vibe/vibe-model /var/local/vibe/vibe-ui'
 md5sum out/vibe out/vibe-model out/vibe-ui

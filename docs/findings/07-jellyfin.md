@@ -449,3 +449,16 @@ Two traps found on the way:
   which invalidates that token for every copy (`/UserViews` then answered
   HTTP 401). The owner had to sign in again. The panel now refuses to sign
   out when `JFUI_TEST` is set, and jfui_test sets it.
+
+**Resume verified (owner, 2026-11-26):** with the cover held until the
+position passes the seek target, no 0:00 frames show, and the loading
+screen's text is right.
+
+### Font
+
+vibe-ui now uses Noto Sans (Regular, SemiBold, Bold; OFL, from
+notofonts/notofonts.github.io, in `native/fonts/`, deployed to
+`/var/local/vibe/fonts`). The TV has only the CJK, symbol and per-script
+Noto files plus Roboto, which stays as the fallback if a Noto file is
+missing or fails to load. The earlier "Â·" and "â€¦" on the loading screen
+were double-encoded text from an edit, not missing glyphs.

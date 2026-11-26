@@ -45,8 +45,13 @@
 #include "gfx.h"
 #include "jfui.h"
 
-#define FONT_REG  "/opt/font/Cobalt_fonts/Roboto-Regular.ttf"
-#define FONT_BOLD "/opt/font/Cobalt_fonts/Roboto-Bold.ttf"
+/* Noto Sans (OFL, native/fonts; deployed to /var/local/vibe/fonts), wider
+ * Unicode coverage than the stock Roboto, which stays as the fallback */
+#define FONT_REG  "/var/local/vibe/fonts/NotoSans-Regular.ttf"
+#define FONT_SEMI "/var/local/vibe/fonts/NotoSans-SemiBold.ttf"
+#define FONT_BOLD "/var/local/vibe/fonts/NotoSans-Bold.ttf"
+#define FONT_REG_STOCK  "/opt/font/Cobalt_fonts/Roboto-Regular.ttf"
+#define FONT_BOLD_STOCK "/opt/font/Cobalt_fonts/Roboto-Bold.ttf"
 
 /* remote keys without a DirectFB name (vibe keys, 2026-11-25) */
 #define KEY_INPUT  0xf068
@@ -1980,7 +1985,12 @@ static int font(struct app *a, const char *path, int height, IDirectFBFont **out
      memset(&fdp, 0, sizeof(fdp));
      fdp.v.flags = DFDESC_HEIGHT;
      fdp.v.height = height;
-     CHECK(path, a->dfb->CreateFont(a->dfb, path, &fdp.v, out));
+     if (access(path, R_OK) == 0 && a->dfb->CreateFont(a->dfb, path, &fdp.v, out) == DFB_OK)
+          return 0;
+     /* our font missing or unreadable: the stock one, so the UI still starts */
+     const char *stock = strstr(path, "Regular") ? FONT_REG_STOCK : FONT_BOLD_STOCK;
+     fprintf(stderr, "vibe-ui: font %s failed, using %s\n", path, stock);
+     CHECK(stock, a->dfb->CreateFont(a->dfb, stock, &fdp.v, out));
      return 0;
 }
 
@@ -2021,8 +2031,8 @@ static int setup(struct app *a, int layer_id)
      CHECK("CreateEventBuffer", a->win->CreateEventBuffer(a->win, &a->events));
 
      if (font(a, FONT_BOLD, 60, &a->f_title) || font(a, FONT_BOLD, 48, &a->f_head) ||
-         font(a, FONT_REG, 34, &a->f_item) || font(a, FONT_BOLD, 38, &a->f_bold) ||
-         font(a, FONT_REG, 28, &a->f_small) || font(a, FONT_BOLD, 21, &a->f_tiny))
+         font(a, FONT_REG, 34, &a->f_item) || font(a, FONT_SEMI, 38, &a->f_bold) ||
+         font(a, FONT_REG, 28, &a->f_small) || font(a, FONT_SEMI, 21, &a->f_tiny))
           return -1;
 
      a->s->Clear(a->s, 0, 0, 0, 0);
