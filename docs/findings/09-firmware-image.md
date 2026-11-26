@@ -81,8 +81,16 @@ It is a full factory image, not an update:
   **byte-identical** to the start of the TV's `mmcblk0boot0`: that write
   changes nothing.
 - The TV's `MBOOT` (p1) is U-Boot built **Feb 06 2023**; its `MBOOTBAK`
-  (p3) and the image's `MBOOT`/`MBOOTBAK` are built **Sep 07 2023**. The
-  flash would replace p1 with the newer build.
+  (p3) and the image's `MBOOT`/`MBOOTBAK` are built **Sep 07 2023**
+  (workspace names `…EARCMP_US` and `…EARCOTA_US`). Both carry "set
+  bootflag to 0/1", "sboot_verify_mboot_flag" and "MBOOTBAK opteeB or
+  armfwB verify failed": they look like an A/B pair chosen by `bootflag`
+  (inferred). With `bootflag=1` the running bootloader is then probably
+  MBOOTBAK, the same build as the image's, written by an OTA.
+- Also in both builds (strings only): "Try another system", "Both system
+  image verify failed, Run USB upgrade to rescue", a forced USB upgrade
+  from the keypad at power-on (`KEYPAD_FORCEUGRADE_KEY`), and "This bin is
+  not encrypted. So the CRC value …". Neither path has been exercised.
 - Order in the script: partition table removed and re-created, `saveenv`,
   `MBOOT` erased and written, then `MBOOTBAK`, then the boot area, then
   everything else. `MstarUpgrade_complete=1` is set only at the very end.
@@ -108,3 +116,31 @@ writing raw eMMC, which AGENTS.md forbids on the running TV; it is meant
 for after a factory flash, with its own written way back.
 
 Not done: flashing.
+
+## Our own image? (assessment, 2026-11-26)
+
+Two independent reviews (the main session and a second model, given the
+facts but not the first's conclusion) agreed:
+
+- "Without Hisense" is not reachable: sboot, MBOOT (verified by sboot),
+  optee, armfw, the kernel and its modules, the MI/utopia libraries,
+  DirectFB, `tvmain`, `systemserver`, Wi-Fi, panel/PM configs and
+  `/opt/mmlib` (HMP, needed for Jellyfin) all stay. The realistic version
+  is a stripped `usrfs`/`optfs` with hash trees rebuilt and `vbmetaB`
+  re-signed with the test key.
+- Risk: `usrfs`, `optfs`, `APP`, `LIB`, `MWLIB` are checked in Linux by
+  `/bin/mtk_mount` (rootfs init, read in the recon log), not by MBOOT, so a
+  bad one fails after boot, past MBOOT's slot fallback. SSH and Wi-Fi run
+  from `usrfs`. The only proven-good rescue payload is the factory image,
+  which is destructive; the USB rescue itself is unexercised; no UART.
+- Value over the runtime approach is small: perhaps 1-2 s of boot,
+  little RAM (about 900 MB already free), defence in depth. The one real
+  gain would be root surviving a `/var/local` wipe. Every change would
+  become a flash cycle instead of a file copy.
+- Decision: stay on runtime debloat and bind mounts. Zero-risk PC work
+  worth doing regardless (it is also the unbrick story for today's
+  setup): disassemble MBOOT's USB path (version compare, forced prefix,
+  script checks, keypad trigger, vbmeta-failure behaviour) and
+  `mtk_mount`'s failure path. Any flashing would first need a UART or
+  spare board, a hook that does not depend on `usrfs`, and a traced,
+  no-write USB script.
