@@ -323,6 +323,7 @@ static struct {
      struct jf_subs subs;
      const struct jf_cue *cue_shown;
      int  menu_on, menu_sel;
+     int  want_audio;            /* switch to this audio track once playing (-1 none) */
      int  dirty;
 } U;
 
@@ -863,12 +864,19 @@ static void start_playback(struct jf_item *it, int64_t start_ticks, double now)
      post_browse(j, "Starting\xe2\x80\xa6");
 }
 
+static void switch_audio(int index, double now);
+
 static void on_player_line(char *l, double now)
 {
      if (!strncmp(l, "state ", 6)) {
           const char *s = l + 6;
           if (!strcmp(s, "playing")) {
                U.pstate = 1;
+               if (U.want_audio >= 0) {
+                    int a = U.want_audio;
+                    U.want_audio = -1;
+                    switch_audio(a, now);
+               }
                if (!U.reported_start) { U.reported_start = 1; report(0, now); }
           } else if (!strcmp(s, "paused")) {
                U.pstate = 2;
@@ -1111,6 +1119,20 @@ static void apply(struct result *r, double now)
           U.scr = J_PLAYER;
           U.menu_on = 0;
           choose_subs(U.play->subtitle_index);     /* the server's default for this user */
+          /* English audio by default (owner): if the default track is in
+           * another language and the file has an English one, switch to it
+           * once playing (direct play: the player switches in place) */
+          U.want_audio = -1;
+          if (U.play->method != JF_TRANSCODE && r->kind == JB_PLAYINFO) {
+               const struct jf_stream *def = stream_of(U.play->audio_index);
+               if (!def || strcmp(def->lang, "eng")) {
+                    for (int i = 0; i < U.play->nstreams; i++)
+                         if (!strcmp(U.play->streams[i].type, "Audio") && !strcmp(U.play->streams[i].lang, "eng")) {
+                              U.want_audio = U.play->streams[i].index;
+                              break;
+                         }
+               }
+          }
           U.osd_until = now + 5;
           U.next_report = now + 10;
           U.dirty = 1;

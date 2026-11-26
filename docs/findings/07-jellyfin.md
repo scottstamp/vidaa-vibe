@@ -576,3 +576,15 @@ audio, 2 video, 3 subtitle. A wrong id quietly selects the first audio
 track. vibe-play logs the list (`track N id ...`) and takes
 `track audio K`; the panel sends that for direct play (no restart) and
 keeps the restart only for conversions.
+
+**Audio switch verified (owner):** `HMPSelectTrack` changes the language
+at once, with no restart. Now also:
+- English by default (owner's wish): if the default audio track isn't
+  English and the file has an English one, the panel switches to it when
+  playback starts (direct play).
+- Aspect ratio (owner: a 2.39:1 film, 1920x800, was stretched to 16:9):
+  vibe-play reads event 19's `HMPVideoInfo_s` (frame +0x1c/+0x20, display
+  aspect +0x24/+0x28, from static analysis) and fits the window to that
+  shape inside the full-screen rect, leaving black bars. It is applied
+  from the 1 s ticker, not inside the callback. Logged as `note video WxH
+  aspect A:B`, to check against the static reading.

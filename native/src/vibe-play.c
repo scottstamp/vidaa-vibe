@@ -214,10 +214,33 @@ static void select_audio(int k)
      say("error no audio track %d (%d tracks)", k, ntracks);
 }
 
+/* The picture's shape: event 19 (HMP_VIDEO_EVENT_INFO_CHANGE) carries
+ * HMPVideoInfo_s: frame width/height at +0x1c/+0x20, display aspect at
+ * +0x24/+0x28 (static analysis). The window is fitted to it inside the
+ * asked-for rect, so a 2.39:1 film gets black bars instead of being
+ * stretched. Set from the ticker, not inside the player's callback. */
+#define HMP_EV_VIDEO_INFO 19
+static volatile int vid_aw, vid_ah, rect_dirty;
+
+static void read_video_info(void *extra)
+{
+     if (!ptr_ok((uintptr_t)extra)) return;
+     const uint8_t *v = extra;
+     int fw = *(const int32_t *)(v + 0x1c), fh = *(const int32_t *)(v + 0x20);
+     int aw = *(const int32_t *)(v + 0x24), ah = *(const int32_t *)(v + 0x28);
+     say("note video %dx%d aspect %d:%d", fw, fh, aw, ah);
+     /* the display aspect if it is sane, else the frame's */
+     if (aw > 0 && ah > 0 && aw * 10 >= ah * 8 && aw <= ah * 4) { vid_aw = aw; vid_ah = ah; }
+     else if (fw > 0 && fh > 0 && fw * 10 >= fh * 8 && fw <= fh * 4) { vid_aw = fw; vid_ah = fh; }
+     else return;
+     rect_dirty = 1;
+}
+
 static void on_event(hmp_t h, int ev, void *extra)
 {
      say("event %d %ld", ev, (long)(intptr_t)extra);
      if (ev == HMP_EV_PREPARED) read_tracks(extra);
+     else if (ev == HMP_EV_VIDEO_INFO) read_video_info(extra);
      if (ev == HMP_EV_VIDEO_END) say_ended();
      else if (ev == HMP_EV_AUDIO_END) audio_ended = 1;
      uintptr_t x = (uintptr_t)extra;
@@ -340,6 +363,17 @@ static struct hmp_rect to_panel(struct hmp_rect r)
 {
      r.v[0] = r.v[0] * panel_w / 1920; r.v[2] = r.v[2] * panel_w / 1920;
      r.v[1] = r.v[1] * panel_h / 1080; r.v[3] = r.v[3] * panel_h / 1080;
+     /* the picture's own shape inside it (letterbox / pillarbox) */
+     if (vid_aw > 0 && vid_ah > 0 && r.v[2] > 0 && r.v[3] > 0) {
+          long long w = r.v[2], h = r.v[3];
+          if (w * vid_ah > h * vid_aw) {            /* box wider: bars at the sides */
+               int nw = (int)(h * vid_aw / vid_ah);
+               r.v[0] += (r.v[2] - nw) / 2; r.v[2] = nw;
+          } else {                                   /* box taller: bars above and below */
+               int nh = (int)(w * vid_ah / vid_aw);
+               r.v[1] += (r.v[3] - nh) / 2; r.v[3] = nh;
+          }
+     }
      return r;
 }
 
@@ -473,6 +507,12 @@ static void *ticker(void *arg)
 {
      while (!quit) {
           sleep(1);
+          if (player && started && rect_dirty) {
+               rect_dirty = 0;
+               struct hmp_rect pr = to_panel(rect);
+               say("rect %d,%d %dx%d -> %d", pr.v[0], pr.v[1], pr.v[2], pr.v[3],
+                   H.SetDisplayRect(player, pr, pr, 0));
+          }
           if (!player || !started || paused) continue;
           struct hmp_pts pt;
           memset(&pt, 0, sizeof pt);
