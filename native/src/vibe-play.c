@@ -143,17 +143,26 @@ static void clock_set(double ms, int run)
 #define HMP_EV_VIDEO_END 7
 #define HMP_EV_AUDIO_END 8
 
+/* the end: 7 (video) ends it at once. Seen on the TV (South Park S29E6):
+ * only 8 (audio) came, then the position froze on the last frame; so 8
+ * ends it once the position stops moving (the ticker checks) */
+static volatile int end_said, audio_ended;
+
+static void say_ended(void)
+{
+     if (end_said) return;
+     end_said = 1;
+     pthread_mutex_lock(&st_lock);
+     playing = 0;
+     pthread_mutex_unlock(&st_lock);
+     say("ended");
+}
+
 static void on_event(hmp_t h, int ev, void *extra)
 {
-     static int ended;
      say("event %d %ld", ev, (long)(intptr_t)extra);
-     if (ev == HMP_EV_VIDEO_END && !ended) {    /* films: the video track ends it */
-          ended = 1;
-          pthread_mutex_lock(&st_lock);
-          playing = 0;
-          pthread_mutex_unlock(&st_lock);
-          say("ended");
-     }
+     if (ev == HMP_EV_VIDEO_END) say_ended();
+     else if (ev == HMP_EV_AUDIO_END) audio_ended = 1;
      uintptr_t x = (uintptr_t)extra;
      if (getenv("VIBE_PLAY_DUMP") && x > 0x10000 && x < 0xc0000000u) {
           const uint32_t *w = extra;
@@ -415,6 +424,9 @@ static void *ticker(void *arg)
            * a seek to 300000): follow it, our clock only fills in between */
           if (r == 0 && pt.pts > 0 && pt.pts < (uint64_t)48 * 3600 * 1000)
                clock_set((double)pt.pts, 1);
+          static uint64_t last_pts;
+          if (audio_ended && r == 0 && pt.pts == last_pts) say_ended();
+          last_pts = pt.pts;
           say("pos %.0f %llu %lld %d%s", position(), (unsigned long long)pt.pts, (long long)pt.b,
               pt.c, r ? " (GetPts failed)" : "");
      }

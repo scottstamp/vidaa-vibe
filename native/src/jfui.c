@@ -49,6 +49,9 @@
 #define K_TRACK     0x38ffffff
 
 #define TICKS_PER_MS 10000LL
+/* the remote's CC button: a Hisense code past DirectFB's list (0xf069,
+ * seen in vibe-ui's log), not DIKS_SUBTITLE */
+#define KEY_CC 0xf069
 
 /* ------------------------------------------------------------ the worker */
 
@@ -313,6 +316,7 @@ static struct {
      int  seek_pending;
      int  reported_start;
      double pos_at;              /* when pos_ms was last set (the player says it every second) */
+     double pos_moved;           /* when it last changed (a frozen end) */
      /* subtitles: the track shown (-1 off), its cues, the menu */
      int  sub_index;
      struct jf_subs subs;
@@ -819,6 +823,11 @@ static void stop_playback(double now, int ended)
      if (U.play) {
           if (ended) U.pos_ms = U.dur_ms;
           report(2, now);
+          if (ended) {               /* watched, whatever the server makes of the position */
+               struct job pj = { .kind = JB_PLAYED, .flag = 1 };
+               snprintf(pj.id, sizeof pj.id, "%s", U.playing.id);
+               post(pj);
+          }
           struct job j = { .kind = JB_STOP_TC };
           j.play = malloc(sizeof *j.play);
           if (j.play) { *j.play = *U.play; post(j); }
@@ -867,7 +876,11 @@ static void on_player_line(char *l, double now)
           U.dirty = 1;
      } else if (!strncmp(l, "pos ", 4)) {
           double p = atof(l + 4);
-          if (!U.seek_pending) { U.pos_ms = p; U.pos_at = now; }
+          if (!U.seek_pending) {
+               if (p != U.pos_ms) U.pos_moved = now;
+               U.pos_ms = p;
+               U.pos_at = now;
+          }
           if (U.osd_until > now) U.dirty = 1;
      } else if (!strncmp(l, "error ", 6)) {
           set_err(l + 6, now);
@@ -1091,6 +1104,7 @@ static void apply(struct result *r, double now)
           }
           U.pos_ms = (double)start_ms;
           U.pos_at = 0;
+          U.pos_moved = 0;
           U.scr = J_PLAYER;
           U.menu_on = 0;
           choose_subs(U.play->subtitle_index);     /* the server's default for this user */
@@ -1164,6 +1178,12 @@ int jfui_tick(double now)
           /* the player says "ended" on HMP's video end-of-play event (7);
            * in case it never comes, its clock running past the end will do */
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms + 3000) {
+               stop_playback(now, 1);
+               return U.on;
+          }
+          /* or frozen on the last frame: near the end and not moving */
+          if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms - 15000 &&
+              U.pos_moved > 0 && now - U.pos_moved > 6) {
                stop_playback(now, 1);
                return U.on;
           }
@@ -1267,7 +1287,7 @@ static void key_menu(int k, int repeat, double now)
           U.menu_on = 0;
           break;
      }
-     case DIKS_BACK: case DIKS_EXIT: case DIKS_SUBTITLE:
+     case DIKS_BACK: case DIKS_EXIT: case DIKS_SUBTITLE: case KEY_CC:
           if (repeat) return;
           U.menu_on = 0;
           break;
@@ -1281,7 +1301,7 @@ static void key_player(int k, int repeat, double now)
 {
      if (U.menu_on) { key_menu(k, repeat, now); return; }
      switch (k) {
-     case DIKS_CURSOR_DOWN: case DIKS_SUBTITLE: {
+     case DIKS_CURSOR_DOWN: case DIKS_SUBTITLE: case KEY_CC: {
           if (repeat || U.pstate == 0) return;
           int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
           U.menu_sel = 0;

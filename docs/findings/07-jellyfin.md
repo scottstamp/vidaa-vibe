@@ -486,3 +486,15 @@ were double-encoded text from an edit, not missing glyphs.
   Subtitle lines are drawn in runs, with the notes in the stock
   `/opt/font/Cobalt_fonts/NotoSansSymbols-Regular-Subsetted.ttf`, which has
   ♪ ♫ ♬.
+
+**End of play, seen (owner, South Park S29E6, direct play):** at the end
+HMP sent event **8** (audio end) and never 7. The position froze at the
+last frame (1321111 ms, ~22:01) and the picture stayed there. vibe-play
+now says `ended` on 7, or on 8 once the position stops moving. As a
+backstop, the panel ends playback when the position is within 15 s of the
+duration and has not moved for 6 s. On the end the panel reports the stop
+at the full duration, marks the item played (`JB_PLAYED`), gives the input
+back and returns to the detail page.
+
+**The remote's CC button** sends key `0xf069` (code 617), a Hisense code
+past DirectFB's list, not `DIKS_SUBTITLE`. It opens the subtitle menu now.
