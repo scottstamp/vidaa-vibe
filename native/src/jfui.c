@@ -1189,11 +1189,11 @@ static void draw_player(struct canvas *c, double now)
           fmt_clock(U.dur_ms, b, sizeof b);
           text(U.h.f_small, bx, by + 20, 40, K_TEXT2, a, -1);
           text(U.h.f_small, bx + bw, by + 20, 40, K_TEXT2, b, 1);
-          static const char *const h[] = { "OK", "Pause", "\xe2\x97\x80 \xe2\x96\xb6", "Seek", "BACK", "Stop" };
+          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "BACK", "Stop" };
           U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 3);
      }
      if (c) {
-          static const char *const h[] = { "OK", "Pause", "\xe2\x97\x80 \xe2\x96\xb6", "Seek", "BACK", "Stop" };
+          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "BACK", "Stop" };
           U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 3);
      }
 }
