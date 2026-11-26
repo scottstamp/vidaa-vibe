@@ -27,6 +27,19 @@ BB=/usr/local/bin/busybox
 exec > $V/early.log 2>&1
 echo "early.sh at uptime $(cat /proc/uptime)"
 
+# The VIDAA boot animation (/usr/local/bin/boot_animation, started by
+# rc.local before the hook) stops when this file exists: it shows black and
+# exits (read in its strings; docs/findings/06-native-route.md, "Boot
+# splashes"). Not when vibe-ui will not start this boot, and not with
+# /var/local/vibe/splash.stock (the way back; or remove these lines).
+splash_stop=1
+for f in $V/splash.stock $V/off /var/local/vibe-off /var/local/vibe-stock; do
+    [ -f $f ] && splash_stop=0
+done
+if [ $splash_stop = 1 ]; then
+    : > /tmp/drv_stop_boot_animation && echo "boot animation: stop file at uptime $(cat /proc/uptime)"
+fi
+
 # first, armed or not: did the last overlaid boot fail?
 if [ -f $V/early.pending ]; then
     echo "early.pending: the last overlaid boot never confirmed: disarming, not mounting"
