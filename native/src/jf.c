@@ -531,8 +531,8 @@ static const char DEVICE_PROFILE[] =
  "{\"Format\":\"pgssub\",\"Method\":\"Encode\"},{\"Format\":\"dvdsub\",\"Method\":\"Encode\"},"
  "{\"Format\":\"dvbsub\",\"Method\":\"Encode\"}]}";
 
-int jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
-                int audio_index, int subtitle_index, struct jf_play *out)
+static int playback_once(struct jf_session *s, const char *item_id, int64_t start_ticks,
+                         int audio_index, int subtitle_index, struct jf_play *out, int force)
 {
      memset(out, 0, sizeof *out);
      cJSON *b = cJSON_CreateObject();
@@ -546,7 +546,7 @@ int jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
      /* tests: $JF_FORCE_TRANSCODE=1, or the file
       * /var/local/vibe/jf.force-transcode, asks for the server's conversion
       * even when the file would play as it is */
-     int force_tc = (getenv("JF_FORCE_TRANSCODE") && getenv("JF_FORCE_TRANSCODE")[0] == '1') ||
+     int force_tc = force || (getenv("JF_FORCE_TRANSCODE") && getenv("JF_FORCE_TRANSCODE")[0] == '1') ||
                     access("/var/local/vibe/jf.force-transcode", F_OK) == 0;
      cJSON_AddBoolToObject(b, "EnableDirectPlay", !force_tc);
      cJSON_AddBoolToObject(b, "EnableDirectStream", !force_tc);
@@ -574,6 +574,7 @@ int jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
      COPY(out->container, jstr(src, "Container"));
      out->runtime_ticks = (int64_t)jnum(src, "RunTimeTicks", 0);
      out->audio_index = (int)jnum(src, "DefaultAudioStreamIndex", -1);
+     out->default_audio = out->audio_index;
      out->subtitle_index = (int)jnum(src, "DefaultSubtitleStreamIndex", -1);
      if (audio_index >= 0) out->audio_index = audio_index;
      if (subtitle_index != JF_SUB_DEFAULT) out->subtitle_index = subtitle_index;
@@ -611,6 +612,17 @@ int jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
      }
      cJSON_Delete(j);
      return 0;
+}
+
+/* The TV's player takes the file's default audio track; another track
+ * comes from the server's remux (video copied) with that track only */
+int jf_playback(struct jf_session *s, const char *item_id, int64_t start_ticks,
+                int audio_index, int subtitle_index, struct jf_play *out)
+{
+     int rc = playback_once(s, item_id, start_ticks, audio_index, subtitle_index, out, 0);
+     if (rc == 0 && audio_index >= 0 && out->method != JF_TRANSCODE && audio_index != out->default_audio)
+          rc = playback_once(s, item_id, start_ticks, audio_index, subtitle_index, out, 1);
+     return rc;
 }
 
 static const char *method_name(int m)

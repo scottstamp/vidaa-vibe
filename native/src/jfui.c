@@ -69,6 +69,7 @@ struct job {
      int  start, lkind;
      int64_t ticks;
      int  event, paused, flag;
+     int  audio, sub;          /* JB_PLAYINFO: tracks (-1 / JF_SUB_DEFAULT: the server's) */
      struct jf_play *play;     /* JB_REPORT / JB_STOP_TC: a copy, freed by worker */
 };
 
@@ -197,7 +198,7 @@ static void *worker(void *arg)
                break;
           case JB_PLAYINFO:
                r->play = calloc(1, sizeof *r->play);
-               r->rc = r->play ? jf_playback(&S, j.id, j.ticks, -1, JF_SUB_DEFAULT, r->play) : -1;
+               r->rc = r->play ? jf_playback(&S, j.id, j.ticks, j.audio, j.sub, r->play) : -1;
                break;
           case JB_REPORT:
                r->rc = jf_report(&S, j.id, j.play, j.event, j.ticks, j.paused);
@@ -857,7 +858,7 @@ static void start_playback(struct jf_item *it, int64_t start_ticks, double now)
 {
      U.playing = *it;
      U.playing.overview = NULL;
-     struct job j = { .kind = JB_PLAYINFO, .ticks = start_ticks };
+     struct job j = { .kind = JB_PLAYINFO, .ticks = start_ticks, .audio = -1, .sub = JF_SUB_DEFAULT };
      snprintf(j.id, sizeof j.id, "%s", it->id);
      post_browse(j, "Starting\xe2\x80\xa6");
 }
@@ -1086,7 +1087,7 @@ static void apply(struct result *r, double now)
           free(U.play);
           U.play = r->play;
           r->play = NULL;
-          U.play_back = U.scr;
+          if (U.scr != J_PLAYER) U.play_back = U.scr;     /* (a track switch restarts from the player) */
           U.pstate = 0;
           U.reported_start = 0;
           U.pos_ms = 0;
@@ -1260,25 +1261,76 @@ static void seek_by(double d_ms, double now)
      U.dirty = 1;
 }
 
-/* the subtitle menu: Off, then every subtitle track */
+/* the track menu: the audio tracks (if more than one), then subtitles
+ * (Off, then every track). Entries: stream indexes; MENU_SUB_OFF is Off,
+ * MENU_HEAD_* are section titles (not selectable) */
+#define MENU_SUB_OFF   (-1)
+#define MENU_HEAD_AUD  (-100)
+#define MENU_HEAD_SUB  (-101)
 static int menu_items(int *idx, int max)
 {
-     int n = 0;
-     idx[n++] = -1;
+     int n = 0, na = 0;
+     for (int i = 0; U.play && i < U.play->nstreams; i++)
+          if (!strcmp(U.play->streams[i].type, "Audio")) na++;
+     if (na > 1) {
+          idx[n++] = MENU_HEAD_AUD;
+          for (int i = 0; U.play && i < U.play->nstreams && n < max; i++)
+               if (!strcmp(U.play->streams[i].type, "Audio")) idx[n++] = U.play->streams[i].index;
+     }
+     idx[n++] = MENU_HEAD_SUB;
+     idx[n++] = MENU_SUB_OFF;
      for (int i = 0; U.play && i < U.play->nstreams && n < max; i++)
           if (!strcmp(U.play->streams[i].type, "Subtitle")) idx[n++] = U.play->streams[i].index;
      return n;
 }
 
+static int menu_head(int v) { return v == MENU_HEAD_AUD || v == MENU_HEAD_SUB; }
+
+/* another audio track: playback restarts here from the server's remux */
+static void switch_audio(int index, double now)
+{
+     if (!U.play || index == U.play->audio_index) return;
+     int64_t ticks = (int64_t)(cur_pos(now) * TICKS_PER_MS);
+     int sub = U.sub_index;
+     report(1, now);
+     player_send("stop keep");
+     player_reap();
+     if (U.play->method == JF_TRANSCODE) {
+          struct job tj = { .kind = JB_STOP_TC };
+          tj.play = malloc(sizeof *tj.play);
+          if (tj.play) { *tj.play = *U.play; post(tj); }
+     }
+     jf_subs_free(&U.subs);
+     U.cue_shown = NULL;
+     U.pstate = 0;
+     U.menu_on = 0;
+     U.playing.position_ticks = ticks;
+     struct job j = { .kind = JB_PLAYINFO, .ticks = ticks, .audio = index, .sub = sub < 0 ? -1 : sub };
+     snprintf(j.id, sizeof j.id, "%s", U.playing.id);
+     post_browse(j, "");
+     U.dirty = 1;
+}
+
 static void key_menu(int k, int repeat, double now)
 {
-     int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
+     int idx[JF_MAX_STREAMS + 3], n = menu_items(idx, JF_MAX_STREAMS + 3);
      switch (k) {
-     case DIKS_CURSOR_UP:   if (U.menu_sel > 0) U.menu_sel--; break;
-     case DIKS_CURSOR_DOWN: if (U.menu_sel < n - 1) U.menu_sel++; break;
+     case DIKS_CURSOR_UP: {
+          int s = U.menu_sel - 1;
+          while (s >= 0 && menu_head(idx[s])) s--;
+          if (s >= 0) U.menu_sel = s;
+          break;
+     }
+     case DIKS_CURSOR_DOWN: {
+          int s = U.menu_sel + 1;
+          while (s < n && menu_head(idx[s])) s++;
+          if (s < n) U.menu_sel = s;
+          break;
+     }
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: {
           if (repeat) return;
           const struct jf_stream *st = stream_of(idx[U.menu_sel]);
+          if (st && !strcmp(st->type, "Audio")) { switch_audio(st->index, now); return; }
           if (idx[U.menu_sel] >= 0 && st && !st->is_text && U.sub_index != idx[U.menu_sel]) {
                set_err("Picture-based subtitles are not supported yet", now);
                return;
@@ -1303,9 +1355,12 @@ static void key_player(int k, int repeat, double now)
      switch (k) {
      case DIKS_CURSOR_DOWN: case DIKS_SUBTITLE: case KEY_CC: {
           if (repeat || U.pstate == 0) return;
-          int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
+          int idx[JF_MAX_STREAMS + 3], n = menu_items(idx, JF_MAX_STREAMS + 3);
           U.menu_sel = 0;
-          for (int i = 0; i < n; i++) if (idx[i] == U.sub_index) U.menu_sel = i;
+          for (int i = 0; i < n; i++)
+               if (idx[i] == U.sub_index && (i == 0 || idx[i] >= 0 || idx[i] == MENU_SUB_OFF) &&
+                   (idx[i] < 0 || strcmp(stream_of(idx[i])->type, "Audio"))) U.menu_sel = i;
+          while (U.menu_sel < n && menu_head(idx[U.menu_sel])) U.menu_sel++;
           U.menu_on = 1;
           U.dirty = 1;
           return;
@@ -1728,13 +1783,18 @@ static void draw_cue(struct canvas *c, const struct jf_cue *cue, int osd)
 
 static void draw_menu(struct canvas *c)
 {
-     int idx[JF_MAX_STREAMS + 1], n = menu_items(idx, JF_MAX_STREAMS + 1);
+     int idx[JF_MAX_STREAMS + 3], n = menu_items(idx, JF_MAX_STREAMS + 3);
      int W = U.h.W, H = U.h.H, mw = 760, row = 72;
-     int show = n > 9 ? 9 : n, top = U.menu_sel >= show ? U.menu_sel - show + 1 : 0;
+     int show = n > 10 ? 10 : n, top = U.menu_sel >= show ? U.menu_sel - show + 1 : 0;
      int mh = 150 + show * row + 110, x = W - 40 - mw, y = (H - mh) / 2;
-     U.h.sheet(U.h.ctx, c, x, y, mw, mh, "Subtitles");
+     U.h.sheet(U.h.ctx, c, x, y, mw, mh, idx[0] == MENU_HEAD_AUD ? "Audio and subtitles" : "Subtitles");
      for (int i = top; i < top + show; i++) {
           int ry = y + 130 + (i - top) * row;
+          if (menu_head(idx[i])) {
+               if (!c) text(U.h.f_tiny, x + 56, ry + 20, row - 28, K_TEXT3,
+                            idx[i] == MENU_HEAD_AUD ? "AUDIO" : "SUBTITLES", -1);
+               continue;
+          }
           const struct jf_stream *st = idx[i] >= 0 ? stream_of(idx[i]) : NULL;
           if (c) {
                if (i == U.menu_sel) U.h.focus(c, x + 24, ry, mw - 48, row - 8, 18);
@@ -1746,7 +1806,9 @@ static void draw_menu(struct canvas *c)
                char ft[180];
                fit(U.h.f_item, t, mw - 160, ft, sizeof ft);
                text(U.h.f_item, x + 56, ry, row - 8, col, ft, -1);
-               if (idx[i] == U.sub_index) text(U.h.f_small, x + mw - 56, ry, row - 8, K_ACCENT_L, "On", 1);
+               int on = st && !strcmp(st->type, "Audio") ? idx[i] == U.play->audio_index
+                                                          : idx[i] == U.sub_index;
+               if (on) text(U.h.f_small, x + mw - 56, ry, row - 8, K_ACCENT_L, "On", 1);
           }
      }
      static const char *const h[] = { "OK", "Choose", "BACK", "Close" };
@@ -1802,11 +1864,11 @@ static void draw_player(struct canvas *c, double now)
           fmt_clock(U.dur_ms, b, sizeof b);
           text(U.h.f_small, bx, by + 20, 40, K_TEXT2, a, -1);
           text(U.h.f_small, bx + bw, by + 20, 40, K_TEXT2, b, 1);
-          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "Subtitles", "BACK", "Stop" };
+          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "Audio, subtitles", "BACK", "Stop" };
           U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 4);
      }
      if (c) {
-          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "Subtitles", "BACK", "Stop" };
+          static const char *const h[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "Audio, subtitles", "BACK", "Stop" };
           U.h.hints(U.h.ctx, c, W / 2, H - 110, h, 4);
      }
 }

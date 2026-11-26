@@ -90,6 +90,7 @@ struct jf_play {
      char container[24];
      int64_t runtime_ticks;
      int  audio_index, subtitle_index;   /* chosen (defaults), -1 = none */
+     int  default_audio;                 /* the source's default audio track */
      int  nstreams;
      struct jf_stream streams[JF_MAX_STREAMS];
 };

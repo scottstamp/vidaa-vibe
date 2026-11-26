@@ -517,3 +517,26 @@ background test, so it is checked from the panel with the switch file.
 with picture and sound. Pause, seek, resume and stop work, and the text
 subtitles stay in time after seeking. Switch file removed afterwards
 (direct play again).
+
+### Audio tracks (2026-11-26)
+
+The player menu (DOWN / CC) now lists the audio tracks (when there is
+more than one) above the subtitles. Picking another track restarts
+playback at the current position: vibe-play gets `stop keep` (stops
+without switching back to the input, so HDMI does not flash in between),
+and `jf_playback` asks again with `AudioStreamIndex`. If the server still
+offers direct play for a non-default track, it asks once more with direct
+play off, so the server remuxes (video copied) with that track; the TV's
+player would otherwise take the file's default. The subtitle choice
+carries over. Not tried on screen yet (needs a file with two audio
+tracks).
+
+Faster route for later: the browser backend switches tracks in the player
+with `HMPSelectTrack(handle, 2, streamId)`
+(`HiBackendStreamingBackendImpl::notifyMediaToSelectAudioIndex`, 0x6899c).
+The streamId comes from `HiStreamIdDataMap::getData(index)`, which is
+filled from player events not yet decoded.
+
+Pinned by the owner: picture-based subtitles (burn-in through a restart
+with `SubtitleStreamIndex` on the conversion path). No such content in the
+libraries yet; to pick up if one turns up.

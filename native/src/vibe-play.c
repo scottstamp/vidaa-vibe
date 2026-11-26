@@ -13,7 +13,8 @@
  * Protocol, one line each way (the URL carries a token, so it comes over
  * stdin, never argv):
  *   in:  open URL [START_MS]   (first line)
- *        pause | resume | seek MS | stop | rect X Y W H Z | pts
+ *        pause | resume | seek MS | stop | stop keep | rect X Y W H Z | pts
+ *        ("stop keep": stop without switching back to the input)
  *   out: state opening|prepared|playing|paused|stopped
  *        pos MS RAW0 RAW1 RAW2   (every second while playing; MS is our
  *                                 estimate, RAW* what HMPGetPts gave)
@@ -557,6 +558,11 @@ int main(int argc, char **argv)
                r = H.GetPts(player, &pt);
                say("pts %d %llu %lld %d", r, (unsigned long long)pt.pts, (long long)pt.b, pt.c);
           } else if (!strcmp(line, "stop")) {
+               break;
+          } else if (!strcmp(line, "stop keep")) {
+               /* the panel restarts playback (another audio track): keep
+                * the picture path on DMP so HDMI does not flash in between */
+               prev_input[0] = 0;
                break;
           }
      }
