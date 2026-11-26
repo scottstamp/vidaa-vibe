@@ -418,8 +418,8 @@ enum { SH_MEDIA, SH_RESUME, SH_NEXT, SH_ACCOUNT };
 #define C_BOT    (1080 - 120)       /* above the key hints */
 #define L_W      352                /* 16:9 card */
 #define L_H      198
-#define P_W      232                /* 2:3 poster */
-#define P_H      348
+#define P_W      196                /* 2:3 poster */
+#define P_H      294
 #define C_GAP    32
 #define C_RAD    14
 #define SH_TITLE 64                 /* a shelf's title above its cards */
@@ -1434,9 +1434,9 @@ static void card_lines(const struct jf_item *it, char *t, size_t tn, char *sub, 
      }
      snprintf(t, tn, "%s", it->name);
      if (it->type == JF_VIEW) return;
-     if (it->type == JF_MOVIE || it->type == JF_VIDEO) {
+     if (it->type == JF_MOVIE || it->type == JF_VIDEO || it->type == JF_SERIES) {
           if (it->year) snprintf(sub, sn, "%d", it->year);
-          return;
+          return;                     /* a series' unwatched count is a badge */
      }
      item_sub(it, sub, sn);
 }
@@ -1460,6 +1460,9 @@ static void draw_card(struct canvas *c, const struct shelf *h, int i, int x, int
                if (pw > w - 20) pw = w - 20;
                gfx_rrect(c, x + 10, y + ch - 16, w - 20, 6, 3, 0xa0000000);
                if (pw >= 6) gfx_rrect_hgrad(c, x + 10, y + ch - 16, pw, 6, 3, K_ACCENT_L, K_ACCENT_R);
+          } else if (it && (it->type == JF_SERIES || it->type == JF_SEASON) && it->unplayed > 0) {
+               int bw = it->unplayed > 99 ? 58 : it->unplayed > 9 ? 46 : 36;
+               gfx_rrect(c, x + w - bw - 10, y + 10, bw, 36, 18, 0xf04f7cff);   /* unwatched count */
           } else if (it && it->played && it->type != JF_VIEW) {
                gfx_rrect(c, x + w - 44, y + 10, 34, 34, 17, 0xe04f7cff);   /* watched */
           }
@@ -1471,6 +1474,13 @@ static void draw_card(struct canvas *c, const struct shelf *h, int i, int x, int
           return;
      }
      card_lines(it, t, sizeof t, sub, sizeof sub);
+     if ((it->type == JF_SERIES || it->type == JF_SEASON) && it->unplayed > 0 &&
+         (it->position_ticks <= 0 || it->runtime_ticks <= 0)) {
+          char n[12];
+          int bw = it->unplayed > 99 ? 58 : it->unplayed > 9 ? 46 : 36;
+          snprintf(n, sizeof n, "%d", it->unplayed);
+          text(U.h.f_tiny, x + w - 10 - bw / 2, y + 10, 36, 0xffffffff, n, 0);
+     }
      if (!img) {                                  /* no picture (yet): the name on the card */
           fit(U.h.f_item, it->name, w - 32, ft, sizeof ft);
           text(U.h.f_item, x + w / 2, y + ch / 2 - 24, 48, K_TEXT2, ft, 0);
