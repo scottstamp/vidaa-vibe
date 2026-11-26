@@ -603,9 +603,17 @@ static void player_reap(void)
                waitpid(U.pid, NULL, 0);
                U.pid = 0;
           }
-          /* killed or crashed: the path may still be on DMP */
-          if (!clean && U.prev_input[0] && strcmp(U.prev_input, "DMP"))
-               biz_switch_input(U.prev_input);
+          /* killed or crashed: the window is left without a picture, and
+           * switching to the input alone does not bring it back (video
+           * info stayed 0,0,0,0). Going through DMP and back rebuilds the
+           * path, as a clean stop does (verified on the screen,
+           * 2026-11-26). Blocks ~3 s, only on this path. */
+          if (!clean && U.prev_input[0] && strcmp(U.prev_input, "DMP")) {
+               fprintf(stderr, "jellyfin: player died (status 0x%x), DMP -> %s\n", st, U.prev_input);
+               biz_switch_input("DMP");
+               sleep(3);
+               fprintf(stderr, "jellyfin: back to %s -> %d\n", U.prev_input, biz_switch_input(U.prev_input));
+          }
      }
 }
 
