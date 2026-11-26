@@ -388,3 +388,11 @@ at stop. The resume point is offered after a stop a few minutes in
 (Jellyfin's own threshold). One glitch: the ◀ ▶ seek hint drew as boxes
 (the font has no arrow glyphs), so it now reads `LEFT/RIGHT`. Not yet
 tested: killing vibe-play mid-film (vibe-ui should switch back).
+
+**Killing vibe-play mid-film (owner at the screen, 2026-11-26).** vibe-ui
+noticed and went back to the item page, but the screen stayed black.
+`source.switch [ts, 9, "HDMI3"]` alone was accepted (r=1) and changed
+nothing: `kilby.sl2.str.servicemode.videoinfo.source` stayed `0,0,0,0`.
+Switching to `DMP`, waiting 3 s, then `HDMI3` brought the picture back
+(video info `4096,2160,60,0`; owner saw HDMI3). vibe-ui now does that
+after any unclean exit of the player (`player_reap`).
