@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #include "jfui.h"
 #include "jf.h"
+#include "biz.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -266,6 +267,7 @@ static struct {
 
      /* playback */
      pid_t pid;
+     char prev_input[64];   /* what showed before the player took the path */
      int  to_fd, from_fd;
      char rbuf[2048];
      int  rlen;
@@ -549,6 +551,9 @@ static int spawn_player(const char *url, const char *mime, int64_t start_ms)
      int in[2], out[2];
      if (pipe2(in, O_CLOEXEC) != 0) return -1;
      if (pipe2(out, O_CLOEXEC) != 0) { close(in[0]); close(in[1]); return -1; }
+     /* vibe-play switches the source to DMP and back to this input itself;
+      * kept here too, for when it dies without doing so */
+     if (biz_current_input(U.prev_input, sizeof U.prev_input) != 0) U.prev_input[0] = 0;
      pid_t pid = fork();
      if (pid < 0) {
           close(in[0]); close(in[1]); close(out[0]); close(out[1]);
@@ -582,9 +587,15 @@ static void player_reap(void)
      if (U.to_fd >= 0) { close(U.to_fd); U.to_fd = -1; }
      if (U.from_fd >= 0) { close(U.from_fd); U.from_fd = -1; }
      if (U.pid > 0) {
-          /* it stops on stdin closing; give it a moment, then insist */
-          for (int i = 0; i < 30; i++) {
-               if (waitpid(U.pid, NULL, WNOHANG) == U.pid) { U.pid = 0; break; }
+          int st = 0, clean = 0;
+          /* it stops on stdin closing (HMP teardown, then the switch back
+           * to the input): give it a moment, then insist */
+          for (int i = 0; i < 60; i++) {
+               if (waitpid(U.pid, &st, WNOHANG) == U.pid) {
+                    U.pid = 0;
+                    clean = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+                    break;
+               }
                usleep(100000);
           }
           if (U.pid > 0) {
@@ -592,6 +603,9 @@ static void player_reap(void)
                waitpid(U.pid, NULL, 0);
                U.pid = 0;
           }
+          /* killed or crashed: the path may still be on DMP */
+          if (!clean && U.prev_input[0] && strcmp(U.prev_input, "DMP"))
+               biz_switch_input(U.prev_input);
      }
 }
 
