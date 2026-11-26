@@ -1334,3 +1334,12 @@ bind-mounts `/var/local/vibe/splash` (`animation.cfg` + `part1/`) over
 `/usr/local/animation/hisense` first thing (~5.3 s), and then does not
 post GUICLOSE. Way back: `/var/local/vibe/splash.stock`, or remove
 `/var/local/vibe/splash`.
+
+**Our frames work (owner, 2026-11-26): only the white bar showed, with no
+VIDAA frame.** The bind mount at 5.38 s comes before boot_animation reads
+its config and frames. So a custom boot animation is
+`/var/local/vibe/splash/{animation.cfg,part1/N.png}`, with no partition
+written. What is visible: roughly 5 s to 7.5 s of uptime (it stops on the
+stock GUICLOSE at ~7 s, then shows `black.png`), looping at the cfg's fps.
+Not yet tried: a size other than 740x300 (how it is placed), and a frame
+count other than 30.
