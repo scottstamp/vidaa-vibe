@@ -52,8 +52,9 @@ menu.
   the same contents as the TV runs now.
 - Checked directly for `rootfs`: its hash tree, recomputed from the image,
   equals vbmeta's root (`a9df5c0c…`). Its `/etc/rc.d/rc.local` has the
-  same `/var/local/otaTest.sh` hook (line 106). The other partitions were
-  not recomputed (pure-Python lz4 is slow); vbmeta equality covers them.
+  same `/var/local/otaTest.sh` hook (line 106). Later recomputed: `usrfs`
+  and `optfs` verify too (with the offset-aware extractor; `fwparse.py`
+  ignores segment offsets), see [12-postboot-verity.md](12-postboot-verity.md).
 - So the root route ([02-root-access.md](02-root-access.md)) still works
   after flashing this image: the browser, its file bridge and `rc.local`
   are the build it was found on.
