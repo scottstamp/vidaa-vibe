@@ -450,8 +450,8 @@ static int first_selectable(int from, int dir)
 
 /* geometry, UI pixels (1920x1080) */
 #define C_X0     96                 /* left edge of the cards */
-#define C_TOP    170                /* below the title */
-#define C_BOT    (1080 - 120)       /* above the key hints */
+#define C_TOP    110                /* below the title (at the top edge) */
+#define C_BOT    (1080 - 44)        /* above the key hints (at the bottom edge) */
 #define L_W      352                /* 16:9 card */
 #define L_H      198
 #define P_W      196                /* 2:3 poster */
@@ -1804,14 +1804,14 @@ static void draw_cards(struct canvas *c)
                char pos[32];
                struct level *L = &U.lv[U.depth - 1];
                snprintf(pos, sizeof pos, "%d / %d", g->sel + 1, L->l.total > g->n ? L->l.total : g->n);
-               text(U.h.f_small, 1920 - C_X0, 80, 80, K_TEXT3, pos, 1);
+               text(U.h.f_small, 1920 - C_X0, 24, 70, K_TEXT3, pos, 1);
           }
           return;
      }
      int y = C_TOP;
      for (int si = U.vtop; si < U.nsh; si++) {
           struct shelf *h = &U.sh[si];
-          if (y + shelf_h(h) - SH_GAP > C_BOT + 40) break;
+          if (y + shelf_h(h) - SH_GAP > C_BOT) break;
           if (!c) text(U.h.f_bold, C_X0, y, SH_TITLE - 16, si == U.cur ? K_TEXT : K_TEXT2, h->title, -1);
           int cy = y + SH_TITLE;
           for (int i = h->scroll; i < h->n; i++) {
@@ -2166,11 +2166,11 @@ void jfui_draw(struct canvas *c, double now)
      default: break;
      }
      if (!c) {
-          text(U.h.f_title, P_X, 80, 80, K_TEXT, title, -1);
+          text(U.h.f_title, C_X0, 24, 70, K_TEXT, title, -1);
           if (U.server_name[0]) {
                snprintf(tbuf, sizeof tbuf, "%s%s%s", U.server_name, U.user_name[0] ? "  \xc2\xb7  " : "",
                         U.user_name);
-               text(U.h.f_small, W - P_X, 80, 80, K_TEXT2, tbuf, 1);
+               text(U.h.f_small, W - C_X0, 24, 70, K_TEXT2, tbuf, 1);
           }
      }
      int y0 = P_TOP, y1 = H - 160;
@@ -2219,8 +2219,9 @@ void jfui_draw(struct canvas *c, double now)
      }
      if (card_screen()) draw_cards(c);
      else draw_rows(c, y0, y1);
-     if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W - P_X, H - 150, 50, K_TEXT2, U.busy_msg, 1);
-     if (!c && U.err_until > now) text(U.h.f_item, P_X, H - 150, 50, 0xffff8080, U.err, -1);
+     /* messages top centre, between the title and the account name */
+     if (!c && U.err_until > now) text(U.h.f_item, W / 2, 24, 70, 0xffff8080, U.err, 0);
+     else if (!c && U.busy && U.busy_msg[0]) text(U.h.f_item, W / 2, 24, 70, K_TEXT2, U.busy_msg, 0);
      static const char *const hs[] = { "ARROWS", "Move", "OK", "Select", "BACK", "Back" };
-     U.h.hints(U.h.ctx, c, W / 2, H - 96, hs, 3);
+     U.h.hints(U.h.ctx, c, W / 2, H - 56, hs, 3);
 }
