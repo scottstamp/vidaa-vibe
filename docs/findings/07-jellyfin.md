@@ -240,3 +240,40 @@ off HDMI to its media source first (the browser's launch path probably does
 this through tvmain/kilby; not found yet), or the MI mmap failure is the
 cause. `HMPGetPts` returns 0; after a seek its first word is the seek
 target.
+
+### The fix: attach the process to MI (measured, 2026-11-26)
+
+Cause (log, then disassembly of `libmi.so` and `libHui.so`):
+`HUI_StreamInjectOpen` opens an MI audio-output handle for every stream, and
+no MI module works in a process that has not attached to MI. With only
+`MI_AOUT_Init` added, vibe-play's stderr showed
+
+    _mi_hm_Open[355] Not inited !!
+    MI_AOUT_Init[222]: mi_hm_open failed (4).
+
+The handle manager (`mi_hm_Init`) has one caller, `MI_SYS_Init`.
+`MI_SYS_Init(NULL)` is a client attach: it waits until the system is up
+(`mi_sys_CheckInited`; `mi_daemon_sys` brings it up) and then sets up this
+process. libHui's `Mif_Board_Start_Board` and `HUI_BtUploadInit` make that
+same call and accept 0 or 2. It is not the system init that the earlier
+static report warned about.
+
+vibe-play now calls `MI_SYS_Init(NULL)` then `MI_AOUT_Init(&zero_byte)`
+after loading libhmplayer (`--no-aout-init` skips both). Both return 0. Side
+messages, harmless so far: `MI_IIC_Init ... Error 0x2`, `SecurityAuthentication:
+pstInitParams is NULL`, `MI_APM_Init: not launched by APM`.
+
+Result of the same 60 s test:
+
+- `HUI_StreamInjectOpen ... success` for audio and video, and
+  `SetDisplayRect` returns 0. "Appending data failed" no longer appears in
+  the log.
+- New events: 9, 10, 5, 1, 2, 17 at start; 21, 1, 2 after a seek; 12, 11 at
+  stop.
+- `pts` word 1 is now the position in ms (12471 at the pause; 308350 after a
+  seek to 300000), and the last word went 1 → 0 after the seek (meaning
+  unknown).
+
+Also fixed: `say()` still wrote to `stdout` after `dup2(2,1)`, so protocol
+lines went out on stderr, mixed with vendor printf. It now writes to the
+saved protocol stream.

@@ -90,12 +90,13 @@ static FILE *proto;
 static void say(const char *fmt, ...)
 {
      va_list ap;
+     FILE *f = proto ? proto : stdout;
      pthread_mutex_lock(&out_lock);
      va_start(ap, fmt);
-     vfprintf(stdout, fmt, ap);
+     vfprintf(f, fmt, ap);
      va_end(ap);
-     fputc('\n', stdout);
-     fflush(stdout);
+     fputc('\n', f);
+     fflush(f);
      pthread_mutex_unlock(&out_lock);
 }
 
@@ -184,6 +185,14 @@ static int load(void)
       * (already initialised) is success. --no-aout-init skips it. */
      if (aout_init) {
           void *mi = dlopen("libmi.so", RTLD_NOW | RTLD_GLOBAL);
+          /* every MI module's Init fails ("_mi_hm_Open: Not inited", 4)
+           * until the process has attached to MI: MI_SYS_Init(NULL) waits
+           * for the system (mi_daemon_sys brings it up) and sets up this
+           * process's handle manager. It is what libHui's
+           * Mif_Board_Start_Board does; 0 or 2 is success. */
+          int (*sys)(void *) = mi ? (int (*)(void *))dlsym(mi, "MI_SYS_Init") : NULL;
+          if (sys) say("note MI_SYS_Init -> %d", sys(NULL));
+          else say("note no MI_SYS_Init");
           int (*aout)(void *) = mi ? (int (*)(void *))dlsym(mi, "MI_AOUT_Init") : NULL;
           if (aout) {
                uint8_t a = 0;
