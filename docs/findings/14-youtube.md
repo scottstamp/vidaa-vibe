@@ -50,6 +50,7 @@ watching):
 | the same file through a plain-**http** proxy on the PC (Range passed) | plays: audio + video tracks, 14.5 s reached |
 | the HLS master through an http proxy that rewrites every playlist URI to itself | plays, separate audio group included |
 | the same master cut down to the 1080p60 AVC variant only | plays |
+| another video's master cut down to **2160p60 VP9 Profile 2 HDR10** (`vp09.02.51.10…`, ~31 Mbit/s) | plays: tracks found, 27.6 s reached in a 40 s run (≈12 s to start); smoothness and HDR to be confirmed by eye. Its SDR 4K variant is ~77 Mbit/s (not tried) |
 
 So: **HMP cannot open YouTube's https URLs** (TLS; it plays Jellyfin's
 http fine), and **HMP plays YouTube's own HLS with separate audio**. The
