@@ -1281,3 +1281,32 @@ on"). Then, at the owner's request, the real wait went from the stock 14
 minutes to **4 minutes + the last minute (5 minutes)**, and the setting
 reads "After 5 min". The stored model value is still the stock on/off. The
 test switch was removed.
+
+## Boot splashes (2026-11-26, read-only investigation; notes in `research/splash/`)
+
+- **Hisense logo: the bootloader.** `/config/boot.ini` has `[LOGO_CFG]
+  LOGO_ON=1 LOGO_NAME=boot0.jpg`; `critical.ini` (p33, ro) has `Logo = 1`;
+  `/serialdata/common/logos/` (p40, ro) holds 133 `bootN.jpg`, and
+  `boot1.jpg` is the teal Hisense logo (1920x1080; viewed). MBOOT draws it
+  before Linux (inferred; its read path was not traced), so nothing within
+  the rules can change it. `/config/bootlogo.jpg` is a MediaTek logo the
+  owner never sees.
+- **VIDAA animation: `/usr/local/bin/boot_animation`** (userspace,
+  DirectFB). rc.local starts it via `mtk_launcher` (read), before our hook
+  (`otaTest.sh`, stage0 ~5.3 s). Its assets are
+  `/usr/local/animation/hisense/` (brand `his`): `animation.cfg` is
+  `fps 20` and `png 740 300 1 1 0 29 35000 part1`, with frames
+  `part1/0.png`..`29.png` (740x300, VIDAA wordmark on black; owner UhisApm,
+  0400). From its strings (not run): it waits for systemserver's
+  DFB_INITED, plays, and stops on the GUICLOSE semaphore, a timeout, or
+  the file **`/tmp/drv_stop_boot_animation`**; then it shows
+  `/usr/local/animation/black.png` and exits. File times put it at about 5
+  to 7–8 s of uptime, until vibe-ui takes over.
+- Levers (untested, each needs a reboot): (1) the hook creates
+  `/tmp/drv_stop_boot_animation` at ~5.3 s, so the animation ends on black;
+  (2) bind-mount our own `animation.cfg` or `part1/` frames (740x300 PNGs,
+  readable by UhisApm), if it reads them after ~5.3 s (a race, not
+  measured); (3) not recommended: killing it, which could leave its frame
+  on the layer and skip GUICLOSED.
+- Slip during the search: a `grep -r` over `/var/log` hung on the
+  `/var/log/console` fifo; the process was killed afterwards.
