@@ -294,3 +294,42 @@ esplayer is never undone, and with MI attached the HDMI switch no longer
 overrides it. Before the next run vibe-play needs a stop path that undoes
 the switch, and a way back without a reboot. Until then each playback test
 may need a reboot.
+
+### The browser's A/V request, and what the display rect really moved (2026-11-26)
+
+Static analysis (`research/jellyfin/srcswitch-re.md`): the stock browser's
+media backend sends `kilby.sl2.action.source.switch` with all-string
+arguments `["ss_access_<n>", "2" (REQUEST_RESOURCE), "hbbtv", "3"]`
+just before `HMPStart`. That call blocks up to 5 s. The backend also sets
+`kilby.sl2.i32.videoplayer.enum.hbbtv.stream.media.status` to 1 for
+playback and back to 0 afterwards. It never sends a release (reason 3).
+vibe-play does both with `--av-request` / `--media-status` (off by default).
+
+Live run with both flags on (owner at the screen): each model call
+returned 1 (success), the decoders opened, and data went through with no
+errors. Still no picture and no sound. **The HDMI3 picture shrank into the
+top-left quarter of the screen**, and after stop the screen went black,
+with the UI still drawn on top.
+
+What that shows:
+- The panel is 3840x2160 (`kilby.sl2.str.video.panel.resolution.info` =
+  `3840*2160`), and `HMPSetDisplayRect` takes panel pixels. Our
+  0,0,1920,1080 is the top-left quarter.
+- That rect moved **the display window that shows HDMI**. The stream's
+  decoders were never connected to it: tvmain kept the window on HDMI3
+  (`source.input.current` stayed `HDMI3` throughout).
+- At stop, HMP's teardown mutes or closes that window. That is the black
+  screen after every run since the decoders first opened. After this run
+  `kilby.sl2.str.servicemode.videoinfo.source` read `0,0,0,0`.
+  Recovery was a reboot.
+
+So the missing step is a switch of the main video path away from HDMI
+to the stream/app source, which tvmain does when the stock UI opens an
+app. The "hbbtv" resource request does not do it, since for HbbTV the
+broadcast stays the source.
+
+Next: find how the stock UI starts a full-screen app (the
+`UI_START_APP` reason 4 call with its JSON), what `source.input.current`
+reads while an app plays, and whether that path needs `app_man` (which
+debloat stops). Also: the rect must be scaled to the panel (x2), and
+stop must not leave the HDMI window muted.
