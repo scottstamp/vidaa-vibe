@@ -76,7 +76,7 @@ struct jf_stream {            /* one MediaStream of a source */
      char codec[16];
      char lang[8];
      char title[96];          /* DisplayTitle */
-     int  is_default, is_external, is_text;
+     int  is_default, is_external, is_text, is_forced;
      int  channels;
 };
 

@@ -324,6 +324,7 @@ static struct {
      const struct jf_cue *cue_shown;
      int  menu_on, menu_sel;
      int  want_audio;            /* switch to this audio track once playing (-1 none) */
+     int  play_restart;          /* the next JB_PLAYINFO restarts from the player */
      int  dirty;
 } U;
 
@@ -859,7 +860,9 @@ static void start_playback(struct jf_item *it, int64_t start_ticks, double now)
 {
      U.playing = *it;
      U.playing.overview = NULL;
-     struct job j = { .kind = JB_PLAYINFO, .ticks = start_ticks, .audio = -1, .sub = JF_SUB_DEFAULT };
+     /* no subtitles asked of the server: the panel picks its own default
+      * (below), and the server never burns in a picture-based one */
+     struct job j = { .kind = JB_PLAYINFO, .ticks = start_ticks, .audio = -1, .sub = -1 };
      snprintf(j.id, sizeof j.id, "%s", it->id);
      post_browse(j, "Starting\xe2\x80\xa6");
 }
@@ -1118,7 +1121,21 @@ static void apply(struct result *r, double now)
           U.pos_moved = 0;
           U.scr = J_PLAYER;
           U.menu_on = 0;
-          choose_subs(U.play->subtitle_index);     /* the server's default for this user */
+          /* subtitles: off, or an English forced text track if there is one
+           * (owner: forced ones translate the parts not in English). A
+           * restart from the player (track switch) keeps the choice. */
+          {
+               int sub = -1;
+               if (U.play_restart) sub = U.play->subtitle_index;
+               else
+                    for (int i = 0; i < U.play->nstreams; i++) {
+                         const struct jf_stream *st = &U.play->streams[i];
+                         if (!strcmp(st->type, "Subtitle") && st->is_forced && st->is_text &&
+                             !strcmp(st->lang, "eng")) { sub = st->index; break; }
+                    }
+               U.play_restart = 0;
+               choose_subs(sub);
+          }
           /* English audio by default (owner): if the default track is in
            * another language and the file has an English one, switch to it
            * once playing (direct play: the player switches in place) */
@@ -1359,6 +1376,7 @@ static void switch_audio(int index, double now)
      U.menu_on = 0;
      U.playing.position_ticks = ticks;
      struct job j = { .kind = JB_PLAYINFO, .ticks = ticks, .audio = index, .sub = sub < 0 ? -1 : sub };
+     U.play_restart = 1;
      snprintf(j.id, sizeof j.id, "%s", U.playing.id);
      post_browse(j, "");
      U.dirty = 1;

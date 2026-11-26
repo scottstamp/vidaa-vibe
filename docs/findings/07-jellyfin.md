@@ -599,3 +599,10 @@ isn't English), and switches when they differ.
 Aspect ratio verified (owner). vibe-play logged `video 1920x800 aspect
 24000:10000` and set `rect 0,280 3840x1600`; the first event 19 had
 zeros, which are ignored.
+
+**English audio default verified (owner).** Subtitles now (owner's rule):
+off by default, or the English *forced* text track if the file has one
+(`IsForced`, now parsed). The panel asks the server for no subtitles
+(`SubtitleStreamIndex=-1`), so it never picks a picture-based default
+that would force a burn-in conversion. The server's subtitle default is
+ignored.

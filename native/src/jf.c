@@ -591,6 +591,7 @@ static int playback_once(struct jf_session *s, const char *item_id, int64_t star
           st->is_default = jbool(ms, "IsDefault");
           st->is_external = jbool(ms, "IsExternal");
           st->is_text = jbool(ms, "IsTextSubtitleStream");
+          st->is_forced = jbool(ms, "IsForced");
           st->channels = (int)jnum(ms, "Channels", 0);
      }
 
