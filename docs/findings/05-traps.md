@@ -64,6 +64,7 @@ and was not observed.
 | `libbizAgent.so`'s string getters `strcpy` with no length | Read in its code, avoided | Large, zeroed buffers (`vibe-model` uses 8 KiB per string) |
 | `libbizAgent.so` is ARM code while `libdirectfb` is Thumb-2 | Hit | Check both modes when disassembling vendor libraries |
 | `grep -o` with wide `.{0,N}` context on the bundle's one-line minified JS runs for minutes on the TV's CPU (load ~47) and timed out | Hit | Copy files to the PC and search there |
+| **vibe-ui alive but drawing nothing** (2026-11-26, once): every frame logged `[DFB] _dfb_mma_alloc fail`, `Lock` failed (a SIGUSR1 shot came out 0 bytes), the remote seemed dead. `/proc/fusion/0/refs` showed a 1920x1080 surface and a window pool still owned by a **dead pid** (1606, not in debloat's stop list: presumably a stock browser/UI child that drew a full-screen surface before it died). `restart-ui.sh` did not help (the leak is in the shared world); a reboot did. Not seen on other boots | Hit | Check: `grep -c mma_alloc last-vibe-ui.log`, `/proc/fusion/0/refs`. Recover with a reboot. Open: which process 1606 was, and stopping it before it allocates |
 
 ## On the PC
 
