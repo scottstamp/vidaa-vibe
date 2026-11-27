@@ -51,12 +51,26 @@ struct yt_seg {
      int  skip;                /* we skip it automatically */
 };
 
+#define YT_MAX_CHAPTERS 64
+struct yt_chapter {
+     double start;             /* seconds */
+     char title[80];
+};
+
 struct yt_video {
      struct yt_item it;
      char *description;        /* malloc'd, may be NULL */
      struct yt_seg segs[YT_MAX_SEGS];
      int  nsegs;
      int  followed;
+     struct yt_chapter chapters[YT_MAX_CHAPTERS];
+     int  nchapters;
+};
+
+struct yt_comment {
+     char author[64];
+     char text[600];
+     char likes[16], age[32], replies[16];
 };
 
 struct yt_channel {
@@ -103,6 +117,12 @@ int  yt_signout(void);
  * set < 0 only reads. *dearrow gets the value; thumbnails ask for DeArrow's
  * when it is on (yt_thumb_url). */
 int  yt_settings(int set_dearrow, int *dearrow);
+/* autoplay of the next video (a helper setting too); set < 0 only reads */
+int  yt_autoplay(int set, int *on);
+
+/* what YouTube suggests after a video; its top comments (up to max) */
+int  yt_related(const char *id, struct yt_list *out);
+int  yt_comments(const char *id, struct yt_comment *out, int max, int *n);
 
 /* casting from a phone ("Link with TV code"; the helper is the lounge screen) */
 struct yt_cmd {

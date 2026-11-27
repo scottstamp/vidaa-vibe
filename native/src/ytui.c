@@ -49,7 +49,8 @@
 
 enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW,
                 JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT, JB_SETTINGS,
-                JB_RSTART, JB_RSTATUS, JB_RSTATE, JB_REMOTE /* a phone's command (remote thread) */ };
+                JB_RSTART, JB_RSTATUS, JB_RSTATE, JB_REMOTE /* a phone's command (remote thread) */,
+                JB_RELATED, JB_COMMENTS, JB_AUTOPLAY };
 
 struct job {
      enum job_kind kind;
@@ -73,6 +74,8 @@ struct result {
      struct yt_account acct;
      char code[32], url[128];      /* JB_SIGNIN; JB_RSTART: code */
      struct yt_cmd cmd;            /* JB_REMOTE */
+     struct yt_comment *comm;      /* JB_COMMENTS: malloc'd */
+     int  ncomm;
      char rconn[120];              /* JB_RSTATUS: the phones connected */
 };
 
@@ -102,6 +105,7 @@ static void result_free(struct result *r)
      yt_list_free(&r->list);
      yt_list_free(&r->ch.l);
      yt_video_free(&r->vid);
+     free(r->comm);
      free(r);
 }
 
@@ -149,7 +153,7 @@ static void *worker(void *arg)
           case JB_FOLLOW:   r->rc = yt_follow(j.id, j.flag); break;
           case JB_ACCOUNT:                              /* and the settings */
                r->rc = yt_account(&r->acct);
-               if (r->rc == 0) yt_settings(-1, &r->n);
+               if (r->rc == 0) { yt_settings(-1, &r->n); yt_autoplay(-1, &r->flag); }
                break;
           case JB_SETTINGS: r->rc = yt_settings(j.flag, &r->n); break;
           case JB_RSTART:
@@ -159,6 +163,12 @@ static void *worker(void *arg)
           case JB_RSTATUS:  r->rc = yt_remote_status(&r->n, r->rconn, sizeof r->rconn); break;
           case JB_RSTATE:   r->rc = yt_remote_state(j.id, j.pos, j.dur, j.arg); break;
           case JB_REMOTE:   break;              /* made by the remote thread, never queued */
+          case JB_RELATED:  r->rc = yt_related(j.id, &r->list); break;
+          case JB_COMMENTS:
+               r->comm = calloc(40, sizeof *r->comm);
+               r->rc = r->comm ? yt_comments(j.id, r->comm, 40, &r->ncomm) : -1;
+               break;
+          case JB_AUTOPLAY: r->rc = yt_autoplay(j.flag, &r->flag); break;
           case JB_SIGNIN:   r->rc = yt_signin_start(r->code, sizeof r->code, r->url, sizeof r->url); break;
           case JB_POLL:
                r->rc = yt_signin_poll(&r->flag, r->acct.name, sizeof r->acct.name);
@@ -176,7 +186,7 @@ static void *worker(void *arg)
 
 enum scr { Y_HOME, Y_CHANNEL, Y_PLAYER };
 enum { TAB_HOME, TAB_SEARCH, TAB_HISTORY, TAB_ACCOUNT, NTABS };
-enum { A_CHANNEL, A_FOLLOW, A_UNFOLLOW, A_RESTART, A_DESC, A_SPEED, A_QUALITY };
+enum { A_CHANNEL, A_FOLLOW, A_UNFOLLOW, A_RESTART, A_DESC, A_SPEED, A_QUALITY, A_COMMENTS };
 
 struct shelf {
      const char *title;
@@ -227,6 +237,17 @@ static struct {
      double pend_pos, remote_start;
      int  want_open;
      const char *rstate_last;
+
+     /* the player's extras: what YouTube suggests next (the "Up next" row,
+      * autoplay), the comments panel, the countdown at the end */
+     struct yt_list rel;
+     char rel_for[16];             /* the video rel belongs to */
+     int  rel_sel, rel_scroll;
+     struct yt_comment *comm;
+     int  ncomm, comm_top, comm_on, comm_loading;
+     int  autoplay;
+     int  upnext;                  /* the end: counting down to rel.items[0] */
+     double upnext_until;
      char code[32], code_url[128];
      double next_poll, confirm_until;
 
@@ -555,6 +576,7 @@ static void build_buttons(void)
           add_btn(t, A_QUALITY);
      }
      if (U.have_det && U.det.description) add_btn(U.desc_on ? "Hide description" : "Description", A_DESC);
+     if (!U.live) add_btn(U.comm_on ? "Hide comments" : "Comments", A_COMMENTS);
      if (U.bsel >= U.nbtn) U.bsel = U.nbtn ? U.nbtn - 1 : 0;
 }
 
@@ -691,10 +713,31 @@ static void stop_playback(double now, int ended)
           report(now);
           update_cards_position(ended ? 0 : U.pos_ms / 1000.0);
      }
-     rstate("stopped");
-     player_send("stop");
+     /* the end, autoplay on, suggestions known: count down to the next one,
+      * staying on the DMP path ("stop keep") */
+     int next = ended && U.autoplay && U.rel.n > 0 && !strcmp(U.rel_for, U.playing.id);
+     if (!next) rstate("stopped");
+     player_send(next ? "stop keep" : "stop");
      player_reap();
      U.home_stale = 1;             /* Continue watching changed */
+     U.comm_on = 0;
+     if (next) {
+          U.upnext = 1;
+          U.upnext_until = now + 8;
+          U.pstate = 0;
+          U.osd_until = 0;
+          U.dirty = 1;
+          return;
+     }
+     go(U.play_back);
+}
+
+/* the countdown cancelled: back to the input the player had replaced */
+static void upnext_cancel(void)
+{
+     U.upnext = 0;
+     rstate("stopped");
+     if (U.prev_input[0] && strcmp(U.prev_input, "DMP")) biz_switch_input(U.prev_input);
      go(U.play_back);
 }
 
@@ -703,14 +746,20 @@ static void stop_playback(double now, int ended)
  * plays: that one stops first (staying on the DMP path) */
 static void play_item(const struct yt_item *it)
 {
-     if (U.scr == Y_PLAYER || U.pid) {
+     if (U.pid) {
           if (U.pstate) report(0);
           player_send("stop keep");
           player_reap();
-     } else {
+     }
+     if (U.scr != Y_PLAYER) {            /* from a list: where to come back to */
           save_cards();
           U.play_back = U.scr;
      }
+     U.upnext = 0;
+     U.comm_on = 0;
+     free(U.comm);
+     U.comm = NULL;
+     U.ncomm = 0;
      U.playing = *it;
      yt_video_free(&U.det);
      memset(&U.det, 0, sizeof U.det);
@@ -886,7 +935,7 @@ static void apply(struct result *r, double now)
      }
      switch (r->kind) {                                  /* the account tab (any screen) */
      case JB_ACCOUNT:
-          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; U.dearrow = r->n; }
+          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; U.dearrow = r->n; U.autoplay = r->flag; }
           else set_err(r->err, now);
           U.dirty = 1;
           return;
@@ -938,6 +987,30 @@ static void apply(struct result *r, double now)
           U.dirty = 1;
           return;
      }
+     case JB_RELATED:
+          if (r->rc != 0 || strcmp(r->id, U.playing.id)) return;   /* a hiccup or an old video */
+          yt_list_free(&U.rel);
+          U.rel = r->list;
+          r->list.items = NULL; r->list.n = 0;
+          snprintf(U.rel_for, sizeof U.rel_for, "%s", r->id);
+          U.rel_sel = U.rel_scroll = 0;
+          U.dirty = 1;
+          return;
+     case JB_COMMENTS:
+          if (strcmp(r->id, U.playing.id)) return;
+          U.comm_loading = 0;
+          if (r->rc != 0) { set_err(r->err, now); U.comm_on = 0; return; }
+          free(U.comm);
+          U.comm = r->comm;
+          U.ncomm = r->ncomm;
+          r->comm = NULL;
+          U.comm_top = 0;
+          U.dirty = 1;
+          return;
+     case JB_AUTOPLAY:
+          if (r->rc == 0) U.autoplay = r->flag;
+          U.dirty = 1;
+          return;
      case JB_SETTINGS:
           if (r->rc != 0) { set_err(r->err, now); return; }
           U.dearrow = r->n;
@@ -1035,6 +1108,11 @@ static void apply(struct result *r, double now)
                U.remote_start = -1;
           }
           rstate("loading");
+          if (strcmp(U.rel_for, U.playing.id)) {       /* the "Up next" row, autoplay */
+               struct job rj = { .kind = JB_RELATED };
+               snprintf(rj.id, sizeof rj.id, "%s", U.playing.id);
+               post(rj);
+          }
           U.pos_ms = U.start_ms;
           U.pos_at = 0;
           U.pos_moved = 0;
@@ -1083,7 +1161,17 @@ int ytui_tick(double now)
           result_free(r);
      }
      read_player(now);
-     if (U.scr == Y_PLAYER) {
+     if (U.scr == Y_PLAYER && U.upnext) {             /* the countdown to the next video */
+          if (!U.rel.n) upnext_cancel();
+          else if (now >= U.upnext_until) {
+               struct yt_item nx = U.rel.items[0];
+               play_item(&nx);
+          } else if (now >= U.next_redraw) {
+               U.next_redraw = now + 1;
+               U.dirty = 1;
+          }
+     }
+     if (U.scr == Y_PLAYER && !U.upnext) {
           if (U.seek_pending && now >= U.seek_at) {
                U.seek_pending = 0;
                player_send("seek %.0f", U.seek_target_ms);
@@ -1187,6 +1275,20 @@ static void osd_action(double now)
           U.osd_focus = 0;
           show_osd(now);
           break;
+     case A_COMMENTS:
+          U.comm_on = !U.comm_on;
+          if (U.comm_on) {
+               U.desc_on = 0;
+               if (!U.ncomm && !U.comm_loading) {
+                    U.comm_loading = 1;
+                    struct job j = { .kind = JB_COMMENTS };
+                    snprintf(j.id, sizeof j.id, "%s", U.playing.id);
+                    post(j);
+               }
+          }
+          build_buttons();
+          show_osd(now);
+          break;
      case A_DESC:
           U.desc_on = !U.desc_on;
           build_buttons();
@@ -1231,6 +1333,51 @@ static void osd_action(double now)
 static void key_player(int k, int repeat, double now)
 {
      int shown = U.osd_until > now;
+     if (U.upnext) {                                   /* the countdown: OK now, BACK no */
+          if (repeat) return;
+          if (k == DIKS_OK || k == DIKS_RETURN || k == DIKS_SELECT || k == DIKS_PLAY) {
+               struct yt_item nx = U.rel.items[0];
+               play_item(&nx);
+          } else if (k == DIKS_BACK || k == DIKS_EXIT || k == DIKS_STOP) {
+               upnext_cancel();
+          }
+          return;
+     }
+     if (U.osd_focus == 2 && shown && U.rel.n) {       /* the "Up next" row */
+          switch (k) {
+          case DIKS_CURSOR_LEFT:  if (U.rel_sel > 0) U.rel_sel--; break;
+          case DIKS_CURSOR_RIGHT: if (U.rel_sel < U.rel.n - 1) U.rel_sel++; break;
+          case DIKS_CURSOR_UP:    U.osd_focus = 1; break;
+          case DIKS_BACK: case DIKS_EXIT:
+               if (repeat) return;
+               U.osd_focus = 0;
+               break;
+          case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: {
+               if (repeat) return;
+               struct yt_item nx = U.rel.items[U.rel_sel];
+               play_item(&nx);
+               return;
+          }
+          default:
+               break;
+          }
+          show_osd(now);
+          return;
+     }
+     if (U.comm_on && !U.osd_focus && (k == DIKS_CURSOR_UP || k == DIKS_CURSOR_DOWN)) {
+          if (k == DIKS_CURSOR_DOWN && U.comm_top < U.ncomm - 1) U.comm_top++;
+          else if (k == DIKS_CURSOR_UP && U.comm_top > 0) U.comm_top--;
+          else if (k == DIKS_CURSOR_DOWN && shown && U.nbtn) U.osd_focus = 1;   /* past the end: the actions */
+          show_osd(now);
+          return;
+     }
+     if (U.comm_on && (k == DIKS_BACK || k == DIKS_EXIT) && !U.osd_focus) {
+          if (repeat) return;
+          U.comm_on = 0;
+          build_buttons();
+          U.dirty = 1;
+          return;
+     }
      if (U.pstate == 0) {                              /* loading: only BACK */
           if ((k == DIKS_BACK || k == DIKS_EXIT || k == DIKS_STOP) && !repeat) stop_playback(now, 0);
           return;
@@ -1239,6 +1386,7 @@ static void key_player(int k, int repeat, double now)
           switch (k) {
           case DIKS_CURSOR_LEFT:  if (U.bsel > 0) U.bsel--; break;
           case DIKS_CURSOR_RIGHT: if (U.bsel < U.nbtn - 1) U.bsel++; break;
+          case DIKS_CURSOR_DOWN:  if (U.rel.n && !strcmp(U.rel_for, U.playing.id)) U.osd_focus = 2; break;
           case DIKS_CURSOR_UP: case DIKS_BACK: case DIKS_EXIT:
                if (repeat) return;
                U.osd_focus = 0;
@@ -1382,7 +1530,7 @@ static int kb_key(int k, int repeat, double now)
 
 /* the Settings tab: three rows (account, phone casting, DeArrow), one button
  * each; UP/DOWN between them, OK presses */
-#define SET_ROWS 3
+#define SET_ROWS 4
 static int account_key(int k, int repeat, double now)
 {
      switch (k) {
@@ -1397,7 +1545,12 @@ static int account_key(int k, int repeat, double now)
           break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
           if (repeat) return 1;
-          if (U.set_sel == 2) {                          /* DeArrow on/off */
+          if (U.set_sel == 2) {                          /* autoplay on/off */
+               struct job j = { .kind = JB_AUTOPLAY, .flag = !U.autoplay };
+               post(j);
+               break;
+          }
+          if (U.set_sel == 3) {                          /* DeArrow on/off */
                struct job j = { .kind = JB_SETTINGS, .flag = !U.dearrow };
                post(j);
                break;
@@ -1781,18 +1934,18 @@ static void draw_account(struct canvas *c, double now)
           snprintf(where, sizeof where, "On your phone or computer, go to %s and enter:",
                    U.code_url[0] ? U.code_url + (strncmp(U.code_url, "https://", 8) ? 0 : 8) : "google.com/device");
           code_box(c, y + 150, where, U.code);
-          y += 360;
+          y += 340;
      } else if (U.acct.signed_in) {
           snprintf(name, sizeof name, "Signed in%s%s", U.acct.name[0] ? " as " : "", U.acct.name);
           set_row(c, y, 0, name, "Home shows your subscriptions, Watch later, likes and recommendations. "
                   "Videos played here are not added to your YouTube history.",
                   U.confirm_until > now ? "Press OK again to sign out" : "Sign out");
-          y += 190;
+          y += 170;
      } else {
           set_row(c, y, 0, U.acct_known ? "Not signed in" : "Checking\xe2\x80\xa6",
                   "Sign in to see your subscriptions and recommendations. You approve it on your phone; "
                   "no password is typed here.", "Sign in");
-          y += 190;
+          y += 170;
      }
      /* phone casting */
      if (U.remote_enabled && U.rconn[0]) snprintf(sub, sizeof sub, "Connected: %s", U.rconn);
@@ -1803,12 +1956,15 @@ static void draw_account(struct canvas *c, double now)
      if (U.rcode[0]) {
           code_box(c, y + 150, "In the YouTube app: Settings \xe2\x80\xba Watch on TV \xe2\x80\xba "
                    "Link with TV code, then enter:", U.rcode);
-          y += 360;
+          y += 340;
      } else {
-          y += 190;
+          y += 170;
      }
+     set_row(c, y, 2, "Autoplay", "When a video ends, play YouTube's next suggestion after a short countdown.",
+             U.autoplay ? "On" : "Off");
+     y += 170;
      /* DeArrow */
-     set_row(c, y, 2, "DeArrow", "Community-submitted titles and thumbnails in place of clickbait "
+     set_row(c, y, 3, "DeArrow", "Community-submitted titles and thumbnails in place of clickbait "
              "(dearrow.ajay.app). Only a short hash prefix of each video id is sent.",
              U.dearrow ? "On" : "Off");
 }
@@ -1821,21 +1977,77 @@ static void draw_toast(struct canvas *c, double now)
      else text(U.h.f_small, W / 2, 50, 64, K_TEXT, U.toast, 0);
 }
 
-/* the player's overlay: details, the bar with SponsorBlock on it, actions */
+/* the chapter at pos (seconds), or NULL */
+static const struct yt_chapter *chapter_at(double pos)
+{
+     const struct yt_chapter *c = NULL;
+     for (int i = 0; U.have_det && i < U.det.nchapters; i++)
+          if (U.det.chapters[i].start <= pos) c = &U.det.chapters[i];
+     return c;
+}
+
+/* above the overlay, while switched on (they outlast the overlay): the
+ * description or the comments */
 #define O_TOP 600                     /* the panel: 600..1040 (hints in its last 70 px) */
+static void draw_panels(struct canvas *c)
+{
+     int W = U.h.W, top = 60, h = O_TOP - 90;
+     if (U.desc_on && U.have_det && U.det.description) {
+          if (c) gfx_rrect(c, 60, top, W - 120, h, 28, 0xe0101420);
+          else {
+               text(U.h.f_bold, 110, top + 24, 50, K_TEXT, "Description", -1);
+               wrap(U.h.f_small, U.det.description, 110, top + 90, 38, W - 220, (h - 110) / 38, 0xffd0d6e2);
+          }
+     }
+     if (!U.comm_on) return;
+     if (c) {
+          gfx_rrect(c, 60, top, W - 120, h, 28, 0xe0101420);
+          return;
+     }
+     char head[64];
+     if (U.ncomm) snprintf(head, sizeof head, "Comments  %d / %d", U.comm_top + 1, U.ncomm);
+     else snprintf(head, sizeof head, "Comments");
+     text(U.h.f_bold, 110, top + 24, 50, K_TEXT, head, -1);
+     if (!U.ncomm) {
+          text(U.h.f_small, 110, top + 90, 40, K_TEXT2, U.comm_loading ? "Loading\xe2\x80\xa6" : "No comments", -1);
+          return;
+     }
+     int y = top + 90, bottom = top + h - 20;
+     for (int i = U.comm_top; i < U.ncomm && y + 80 < bottom; i++) {
+          const struct yt_comment *m = &U.comm[i];
+          char who[160];
+          snprintf(who, sizeof who, "%s", m->author);
+          if (m->age[0]) join(who, sizeof who, m->age);
+          if (m->likes[0]) { size_t l = strlen(who); snprintf(who + l, sizeof who - l, DOT "%s likes", m->likes); }
+          text(U.h.f_small, 110, y, 40, K_TEXT, who, -1);
+          int lines = wrap(U.h.f_small, m->text, 110, y + 40, 38, W - 220, (bottom - y - 40) / 38 < 3 ? (bottom - y - 40) / 38 : 3,
+                           0xffd0d6e2);
+          y += 40 + (lines ? lines : 1) * 38 + 22;
+     }
+}
+
+/* "Up next": the suggestions, a row of cards above the overlay */
+static void draw_related(struct canvas *c)
+{
+     int W = U.h.W, y = O_TOP - 300, x0 = 110, n = U.rel.n;
+     int per = (W - 2 * x0 + C_GAP) / (L_W + C_GAP);
+     if (U.rel_sel < U.rel_scroll) U.rel_scroll = U.rel_sel;
+     if (U.rel_sel >= U.rel_scroll + per) U.rel_scroll = U.rel_sel - per + 1;
+     if (c) gfx_rrect(c, 60, y - 70, W - 120, L_H + 160, 28, 0xd8101420);
+     else text(U.h.f_bold, x0, y - 60, 50, K_TEXT, "Up next", -1);
+     for (int i = U.rel_scroll; i < n && i < U.rel_scroll + per; i++)
+          draw_card(c, &U.rel.items[i], x0 + (i - U.rel_scroll) * (L_W + C_GAP), y, i == U.rel_sel);
+}
+
+/* the player's overlay: details, the bar with SponsorBlock and chapters on
+ * it, actions */
 static void draw_overlay(struct canvas *c, double now)
 {
      int W = U.h.W, H = U.h.H;
      int bx = 110, bw = W - 220, by = O_TOP + 250;   /* bar; times and actions under it */
      double pos = U.seek_pending ? U.seek_target_ms : cur_pos(now);
      const struct yt_item *it = &U.playing;
-     if (U.desc_on && U.have_det && U.det.description) {
-          if (c) gfx_rrect(c, 60, 60, W - 120, O_TOP - 90, 28, 0xe0101420);
-          else {
-               text(U.h.f_bold, 110, 84, 50, K_TEXT, "Description", -1);
-               wrap(U.h.f_small, U.det.description, 110, 150, 38, W - 220, (O_TOP - 200) / 38, 0xffd0d6e2);
-          }
-     }
+     if (U.osd_focus == 2 && U.rel.n) draw_related(c);
      if (c) {
           gfx_rrect(c, 60, O_TOP, W - 120, H - O_TOP - 40, 32, 0xd8101420);
           gfx_rrect(c, bx, by, bw, 10, 5, K_TRACK);
@@ -1849,6 +2061,11 @@ static void draw_overlay(struct canvas *c, double now)
                     int ex = bx + (int)(bw * (g->end * 1000.0 / U.dur_ms));
                     if (ex - sx < 4) ex = sx + 4;
                     gfx_rrect(c, sx, by, ex - sx, 10, 2, g->skip ? K_SKIP : K_SEG);
+               }
+               /* chapters: a gap in the bar where each starts */
+               for (int i = 1; U.have_det && i < U.det.nchapters; i++) {
+                    int cx = bx + (int)(bw * (U.det.chapters[i].start * 1000.0 / U.dur_ms));
+                    gfx_rrect(c, cx - 2, by - 1, 4, 12, 0, 0xff101420);
                }
                int kx = bx + w;                        /* the playhead */
                gfx_rrect(c, kx - 10, by - 5, 20, 20, 10, 0xffffffff);
@@ -1866,15 +2083,12 @@ static void draw_overlay(struct canvas *c, double now)
           join(line, sizeof line, v);
           join(line, sizeof line, a);
           text(U.h.f_small, bx, O_TOP + 96, 40, K_TEXT2, line, -1);
-          if (U.have_det && U.det.nsegs) {
-               int ns = 0;
-               double secs = 0;
-               for (int i = 0; i < U.det.nsegs; i++)
-                    if (U.det.segs[i].skip) { ns++; secs += U.det.segs[i].end - U.det.segs[i].start; }
-               char sb[120];
-               if (ns) snprintf(sb, sizeof sb, "SponsorBlock: %d segment%s skipped (%.0f s)", ns, ns > 1 ? "s" : "", secs);
-               else snprintf(sb, sizeof sb, "SponsorBlock: %d segment%s marked", U.det.nsegs, U.det.nsegs > 1 ? "s" : "");
-               text(U.h.f_small, bx, O_TOP + 140, 40, K_SKIP, sb, -1);
+          const struct yt_chapter *ch = chapter_at(pos / 1000.0);
+          if (ch && ch->title[0]) {
+               char ct[120], ft[130];
+               snprintf(ct, sizeof ct, "Chapter: %s", ch->title);
+               fit(U.h.f_small, ct, bw, ft, sizeof ft);
+               text(U.h.f_small, bx, O_TOP + 140, 40, 0xffd0d6e2, ft, -1);
           }
           char p1[32], p2[32];
           if (U.live) snprintf(p1, sizeof p1, "LIVE");
@@ -1889,7 +2103,7 @@ static void draw_overlay(struct canvas *c, double now)
           int aw = (int)strlen(U.btn[i].title) * 16;
           if (U.h.f_small) U.h.f_small->GetStringWidth(U.h.f_small, U.btn[i].title, -1, &aw);
           aw += 56;
-          int foc = U.osd_focus && i == U.bsel;
+          int foc = U.osd_focus == 1 && i == U.bsel;
           if (c) {
                if (foc) gfx_rrect(c, ax, ay, aw, ah, ah / 2, 0xffffffff);
                else gfx_rrect_outline(c, ax, ay, aw, ah, ah / 2, 2, 0x50ffffff);
@@ -1899,14 +2113,43 @@ static void draw_overlay(struct canvas *c, double now)
           ax += aw + 16;
      }
      static const char *const hb[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "More", "BACK", "Hide" };
-     static const char *const ha[] = { "LEFT/RIGHT", "Move", "OK", "Select", "UP", "Back to the bar" };
-     if (U.osd_focus) U.h.hints(U.h.ctx, c, W / 2, H - 98, ha, 3);
+     static const char *const ha[] = { "LEFT/RIGHT", "Move", "OK", "Select", "DOWN", "Up next", "UP", "Back" };
+     static const char *const hr[] = { "LEFT/RIGHT", "Move", "OK", "Play", "UP", "Back" };
+     if (U.osd_focus == 2) U.h.hints(U.h.ctx, c, W / 2, H - 98, hr, 3);
+     else if (U.osd_focus) U.h.hints(U.h.ctx, c, W / 2, H - 98, ha, U.rel.n ? 4 : 3);
      else U.h.hints(U.h.ctx, c, W / 2, H - 98, hb, 4);
+}
+
+/* the end, autoplay: what plays next, and when */
+static void draw_upnext(struct canvas *c, double now)
+{
+     int W = U.h.W, H = U.h.H;
+     const struct yt_item *nx = &U.rel.items[0];
+     char url[256];
+     yt_thumb_url(nx->id, 'l', url, sizeof url);
+     const struct jfimg *im = jfimg_get_url(url, 720, 405);
+     if (c) {
+          gfx_fill_vgradient_full(c, 0xff05070c, 0xff0b0e16);
+          if (im) gfx_image(c, (W - 720) / 2, 180, 720, 405, 18, im->px, im->w, 255);
+          else gfx_rrect(c, (W - 720) / 2, 180, 720, 405, 18, 0xff1c2130);
+     } else {
+          char ft[240], when[48];
+          text(U.h.f_bold, W / 2, 100, 60, K_TEXT2, "Up next", 0);
+          fit(U.h.f_head, nx->title, W - 240, ft, sizeof ft);
+          text(U.h.f_head, W / 2, 620, 70, K_TEXT, ft, 0);
+          text(U.h.f_small, W / 2, 700, 44, K_TEXT2, nx->channel, 0);
+          int left = (int)(U.upnext_until - now + 0.99);
+          snprintf(when, sizeof when, "Playing in %d s", left > 0 ? left : 0);
+          text(U.h.f_item, W / 2, 780, 50, K_TEXT, when, 0);
+     }
+     static const char *const h[] = { "OK", "Play now", "BACK", "Cancel" };
+     U.h.hints(U.h.ctx, c, W / 2, H - 98, h, 2);
 }
 
 static void draw_player(struct canvas *c, double now)
 {
      int W = U.h.W;
+     if (U.upnext && U.rel.n) { draw_upnext(c, now); return; }
      if (U.pstate == 0) {
           /* loading: opaque over the video plane until it plays */
           if (c) {
@@ -1926,6 +2169,7 @@ static void draw_player(struct canvas *c, double now)
           return;
      }
      draw_toast(c, now);
+     draw_panels(c);
      if (U.osd_until > now || U.pstate == 2 || U.seek_pending) draw_overlay(c, now);
      if (U.err_until > now && !c) text(U.h.f_item, W / 2, 140, 60, 0xffff8080, U.err, 0);
 }

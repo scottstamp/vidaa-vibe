@@ -216,6 +216,13 @@ int yt_video(const char *id, struct yt_video *out)
      out->description = d[0] ? strdup(d) : NULL;
      out->followed = flag(j, "followed");
      const cJSON *s;
+     const cJSON *ch;
+     cJSON_ArrayForEach(ch, cJSON_GetObjectItemCaseSensitive(j, "chapters")) {
+          if (out->nchapters >= YT_MAX_CHAPTERS) break;
+          struct yt_chapter *c = &out->chapters[out->nchapters++];
+          c->start = num(ch, "start");
+          snprintf(c->title, sizeof c->title, "%s", str(ch, "title"));
+     }
      cJSON_ArrayForEach(s, cJSON_GetObjectItemCaseSensitive(j, "segments")) {
           if (out->nsegs >= YT_MAX_SEGS) break;
           if (strcmp(str(s, "action"), "skip") && strcmp(str(s, "category"), "poi_highlight")) continue;
@@ -384,6 +391,51 @@ int yt_settings(int set, int *dearrow)
      if (!j) return -1;
      dearrow_on = flag(j, "dearrow");
      if (dearrow) *dearrow = dearrow_on;
+     cJSON_Delete(j);
+     return 0;
+}
+
+int yt_autoplay(int set, int *on)
+{
+     char path[64];
+     snprintf(path, sizeof path, set < 0 ? "/api/settings" : "/api/settings?autoplay=%d", set);
+     cJSON *j = call(set < 0 ? "GET" : "POST", path, 15000);
+     if (!j) return -1;
+     /* absent (an older helper): on, as on YouTube */
+     const cJSON *a = cJSON_GetObjectItemCaseSensitive(j, "autoplay");
+     *on = a ? cJSON_IsTrue(a) : 1;
+     cJSON_Delete(j);
+     return 0;
+}
+
+int yt_related(const char *id, struct yt_list *out)
+{
+     char path[64];
+     snprintf(path, sizeof path, "/api/related?id=%s", id);
+     cJSON *j = call("GET", path, 30000);
+     if (!j) { out->items = NULL; out->n = 0; return -1; }
+     int r = list_of(cJSON_GetObjectItemCaseSensitive(j, "items"), out);
+     cJSON_Delete(j);
+     return r;
+}
+
+int yt_comments(const char *id, struct yt_comment *out, int max, int *n)
+{
+     *n = 0;
+     char path[80];
+     snprintf(path, sizeof path, "/api/comments?id=%s&n=%d", id, max);
+     cJSON *j = call("GET", path, 40000);
+     if (!j) return -1;
+     const cJSON *c;
+     cJSON_ArrayForEach(c, cJSON_GetObjectItemCaseSensitive(j, "items")) {
+          if (*n >= max) break;
+          struct yt_comment *m = &out[(*n)++];
+          snprintf(m->author, sizeof m->author, "%s", str(c, "author"));
+          snprintf(m->text, sizeof m->text, "%s", str(c, "text"));
+          snprintf(m->likes, sizeof m->likes, "%s", str(c, "likes"));
+          snprintf(m->age, sizeof m->age, "%s", str(c, "age"));
+          snprintf(m->replies, sizeof m->replies, "%s", str(c, "replies"));
+     }
      cJSON_Delete(j);
      return 0;
 }
