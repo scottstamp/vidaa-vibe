@@ -523,48 +523,77 @@ def tile_item(t):
         it["position"] = dur * pct / 100.0
     return it
 
-def tv_shelves(browse_id, default_title):
-    """[(title, items)] from a TV browse page"""
-    d = innertube("browse", {"browseId": browse_id})
-    shelves, seen = [], set()
-    def walk(o, title):
+def tiles_in(x, seen, out):
+    """every playable tile under x, in order, once each"""
+    if isinstance(x, dict):
+        if "tileRenderer" in x:
+            it = tile_item(x["tileRenderer"])
+            if it and it["id"] not in seen:
+                seen.add(it["id"])
+                out.append(it)
+            return
+        for v in x.values():
+            tiles_in(v, seen, out)
+    elif isinstance(x, list):
+        for v in x:
+            tiles_in(v, seen, out)
+    return out
+
+def next_token(x):
+    c = find(x, "nextContinuationData")
+    return (c or {}).get("continuation")
+
+def page_shelves(d, seen):
+    """[[title, items, continuation]] of the shelves in a TV browse page (or a
+    sectionListContinuation); title "" when the shelf has none"""
+    out = []
+    def walk(o):
         if isinstance(o, dict):
             if "shelfRenderer" in o:
                 sh = o["shelfRenderer"]
-                t = text_of(find(sh.get("headerRenderer") or {}, "title") or {}) or title
-                items = []
-                def tiles(x):
-                    if isinstance(x, dict):
-                        if "tileRenderer" in x:
-                            it = tile_item(x["tileRenderer"])
-                            if it and it["id"] not in seen:
-                                seen.add(it["id"])
-                                items.append(it)
-                            return
-                        for v in x.values():
-                            tiles(v)
-                    elif isinstance(x, list):
-                        for v in x:
-                            tiles(v)
-                tiles(sh.get("content"))
+                t = text_of(find(sh.get("headerRenderer") or {}, "title") or {})
+                items = tiles_in(sh.get("content"), seen, [])
                 if items:
-                    shelves.append((t, items))
+                    out.append([t, items, next_token(sh.get("content"))])
                 return
-            if "tileRenderer" in o:                     # tiles outside a shelf (a grid)
-                it = tile_item(o["tileRenderer"])
-                if it and it["id"] not in seen:
-                    seen.add(it["id"])
-                    if not shelves or shelves[-1][0] != title:
-                        shelves.append((title, []))
-                    shelves[-1][1].append(it)
-                return
-            for v in o.values():
-                walk(v, title)
+            for k, v in o.items():
+                if k != "continuations":
+                    walk(v)
         elif isinstance(o, list):
             for v in o:
-                walk(v, title)
-    walk(d, default_title)
-    return shelves
+                walk(v)
+    walk(d.get("contents") or d.get("continuationContents") or d)
+    return out
+
+def tv_shelves(browse_id):
+    """[(title, items)] from a signed-in TV browse page.
+    FEsubscriptions: YouTube sends "Most relevant", then the chronological feed
+    as untitled rows of 3, then Shorts; we keep the feed only (one shelf, a
+    second page of rows added). Other pages: titled shelves of 5, each made
+    longer with one continuation page (the first few shelves)."""
+    d = innertube("browse", {"browseId": browse_id})
+    seen = set()
+    shelves = page_shelves(d, seen)
+    if browse_id == "FEsubscriptions":
+        feed = [it for t, items, _ in shelves if not t for it in items]
+        tok = next_token(find(d, "sectionListRenderer") or {})
+        if tok:
+            try:
+                more = innertube("browse", {"continuation": tok})
+                feed += [it for t, items, _ in page_shelves(more, seen) if not t for it in items]
+            except Exception as e:
+                print("subscriptions: more:", e, file=sys.stderr)
+        return [("Subscriptions", feed)] if feed else []
+    out = []
+    for i, (t, items, tok) in enumerate(shelves):
+        if tok and i < 4:
+            try:
+                more = innertube("browse", {"continuation": tok})
+                items = items + tiles_in(more.get("continuationContents") or more, seen, [])
+            except Exception as e:
+                print("%s: more: %s" % (browse_id, e), file=sys.stderr)
+        out.append((t or "Recommended", items))
+    return out
 
 def account_name():
     try:
@@ -635,13 +664,12 @@ def home():
             got = LIST_CACHE.get(k)
             if got is None:
                 try:
-                    got = LIST_CACHE.put(k, tv_shelves(bid, title))
+                    got = LIST_CACHE.put(k, tv_shelves(bid))
                 except Exception as e:
                     print("home: %s: %s" % (bid, e), file=sys.stderr)
                     got = []
-            for t, items in got[:6]:
-                shelves.append({"title": t if bid == "FEwhat_to_watch" or t == title else "%s: %s" % (title, t),
-                                "items": with_positions(items)[:30]})
+            for t, items in got[:8]:
+                shelves.append({"title": t, "items": with_positions(items)[:40]})
     for c in STATE.follows():
         try:
             ch = channel(c["id"], 16)

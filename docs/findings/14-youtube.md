@@ -168,3 +168,39 @@ the script's header.
   follow (its shelf on Home), quality switch, speed, a video to its end
   (back to the list it was played from, recorded as watched).
 - Helper: positions are applied when a cached list is served.
+
+## Sign-in (2026-11-27, owner signed in)
+
+- As SmartTube does it (its MediaServiceCore `auth/V2`): the YouTube TV
+  app's OAuth client id and secret are read from `base.js` of
+  `https://www.youtube.com/tv` (fetched with a Cobalt TV user agent; regex
+  `clientId:"...apps.googleusercontent.com",X:"secret"`); the TV client
+  version from the same page (`7.20261123.19.00` today). Device flow:
+  `POST youtube.com/o/oauth2/device/code` {client_id, device_id (a UUID
+  kept in the helper's state), model_name `ytlr::`, scope
+  `http://gdata.youtube.com https://www.googleapis.com/auth/youtube-paid-content`}
+  -> user code; Google says to enter it at **www.google.com/device**.
+  Poll `POST /o/oauth2/token` (grant `http://oauth.net/grant_type/device/1.0`)
+  every 5 s; refresh with `grant_type=refresh_token`. The refresh token is
+  in the helper's state file on fin (vibeyt only); the TV never holds it.
+- Signed-in data: InnerTube `browse` as `TVHTML5` with `Authorization:
+  Bearer`. Signed out, `FEwhat_to_watch` only returns a sign-in nudge.
+  `FEsubscriptions` = "Most relevant" (15), then the chronological feed as
+  **untitled shelves of 3 tiles**, then Shorts; `FEwhat_to_watch` = titled
+  shelves of 5 (Recommended, Recently uploaded, From your Watch later
+  playlist, topic shelves). Each shelf has a `nextContinuationData` token
+  (more tiles: `browse {"continuation": tok}`), the page another for more
+  shelves. Tiles: `tileRenderer` -> `onSelectCommand.watchEndpoint.videoId`,
+  `metadata.tileMetadataRenderer.title` and `lines` (channel; "views · age"),
+  `header.tileHeaderRenderer.thumbnailOverlays`
+  (`thumbnailOverlayTimeStatusRenderer` duration/style LIVE/SHORTS,
+  `thumbnailOverlayResumePlaybackRenderer.percentDurationWatched`).
+  Account name: `account/accounts_list`. Debug aid: `helper/probe_feed.py`.
+- Home when signed in: Continue watching, **Subscriptions** (the feed rows
+  merged, one more page: 27 videos), YouTube's own shelves (each extended
+  by one continuation), then locally followed channels. Shorts, movies and
+  playlists are skipped. Account tab: Sign in (code, polled), Cancel, Sign
+  out (OK twice; forgets the token on fin only).
+- Not done: playback is still resolved signed out (yt-dlp), so members-only
+  and age-restricted videos do not play; watching here is not reported to
+  YouTube (no history, no "watched" marks there).

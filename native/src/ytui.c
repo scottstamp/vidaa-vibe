@@ -1748,5 +1748,8 @@ void ytui_draw(struct canvas *c, double now)
      if (!c && U.err_until > now) text(mf, W / 2, my, mh, 0xffff8080, U.err, 0);
      else if (!c && U.busy && U.busy_msg[0] && U.toast_until <= now) text(mf, W / 2, my, mh, K_TEXT2, U.busy_msg, 0);
      static const char *const hs[] = { "ARROWS", "Move", "OK", "Play", "BACK", "Back" };
-     U.h.hints(U.h.ctx, c, W / 2, H - 56, hs, 3);
+     static const char *const ha[] = { "ARROWS", "Move", "OK", "Select", "BACK", "Back" };
+     int cards = U.scr == Y_CHANNEL || (!U.tab_focus && (U.tab == TAB_HOME || U.tab == TAB_HISTORY ||
+                                                       (U.tab == TAB_SEARCH && !U.kb_focus)));
+     U.h.hints(U.h.ctx, c, W / 2, H - 56, cards ? hs : ha, 3);
 }
