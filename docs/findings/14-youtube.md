@@ -131,3 +131,18 @@ variants, seeking within HLS.
   selfpromo 61.1-75.1" on an LTT video; progress saved to the helper.
 - Not yet: sign-in (device code), quality choice in the UI, live chat,
   DeArrow, casting, playback speed, more results paging.
+
+## The helper on fin (2026-11-27)
+
+Installed with `helper/install-fin.sh` on `fin` (192.168.2.31, Ubuntu 24.04
+in Proxmox, also the Jellyfin server; root by the TV's key, host key pinned
+in `server/keys/fin_known_hosts`): user `vibeyt` (no login),
+`/opt/vibe-ythelper` (script + venv, yt-dlp 2026.11.23, Node 24 as the JS
+runtime), state `/var/lib/vibe-ythelper/state.json` (moved over from the
+PC), `vibe-ythelper.service` on :8770 (sandboxed: ProtectSystem=strict,
+ProtectHome, NoNewPrivileges), `vibe-ythelper-update.timer` (daily
+`pip install -U yt-dlp` + restart). fin's stream URLs are bound to the same
+public IP as the TV's (checked), so the TV fetches what fin resolves. The
+TV's `/var/local/vibe/state/youtube` says `helper=http://192.168.2.31:8770`
+(owned by UhisUI), and that is also the built-in default now. Way back: in
+the script's header.

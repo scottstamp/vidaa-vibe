@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define YT_STATE_FILE   "/var/local/vibe/state/youtube"
-#define YT_DEFAULT_BASE "http://192.168.2.154:8770"
+#define YT_DEFAULT_BASE "http://192.168.2.31:8770"     /* fin, the Jellyfin box */
 #define YT_MAX_SHELVES  16
 #define YT_MAX_SEGS     40
 
