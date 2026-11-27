@@ -47,7 +47,8 @@
 
 /* ------------------------------------------------------------ the worker */
 
-enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW };
+enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW,
+                JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT };
 
 struct job {
      enum job_kind kind;
@@ -67,6 +68,8 @@ struct result {
      struct yt_channel ch;
      struct yt_video vid;
      struct yt_play play;
+     struct yt_account acct;
+     char code[32], url[128];      /* JB_SIGNIN */
 };
 
 #define QMAX 32
@@ -140,6 +143,13 @@ static void *worker(void *arg)
           case JB_REPLAY:   r->rc = yt_play(j.id, j.n, &r->play); break;    /* another quality */
           case JB_PROGRESS: r->rc = yt_progress(j.id, j.pos, j.dur); break;
           case JB_FOLLOW:   r->rc = yt_follow(j.id, j.flag); break;
+          case JB_ACCOUNT:  r->rc = yt_account(&r->acct); break;
+          case JB_SIGNIN:   r->rc = yt_signin_start(r->code, sizeof r->code, r->url, sizeof r->url); break;
+          case JB_POLL:
+               r->rc = yt_signin_poll(&r->flag, r->acct.name, sizeof r->acct.name);
+               if (r->rc == 0 && r->flag < 0) snprintf(r->err, sizeof r->err, "%s", yt_error());
+               break;
+          case JB_SIGNOUT:  r->rc = yt_signout(); break;
           }
           if (r->rc != 0) snprintf(r->err, sizeof r->err, "%s", yt_error());
           deliver(r);
@@ -150,7 +160,7 @@ static void *worker(void *arg)
 /* ------------------------------------------------------------- UI state */
 
 enum scr { Y_HOME, Y_CHANNEL, Y_PLAYER };
-enum { TAB_HOME, TAB_SEARCH, TAB_HISTORY, NTABS };
+enum { TAB_HOME, TAB_SEARCH, TAB_HISTORY, TAB_ACCOUNT, NTABS };
 enum { A_CHANNEL, A_FOLLOW, A_UNFOLLOW, A_RESTART, A_DESC, A_SPEED, A_QUALITY };
 
 struct shelf {
@@ -186,6 +196,12 @@ static struct {
      struct yt_channel ch;
      int  have_ch, ch_sel, ch_vtop;
      enum scr ch_back;
+
+     /* the account tab: what the helper says; a sign-in in progress */
+     struct yt_account acct;
+     int  acct_known, acct_focus;  /* acct_focus: its button has the focus */
+     char code[32], code_url[128];
+     double next_poll, confirm_until;
 
      /* playback: what plays and its details (the overlay's) */
      enum scr play_back;          /* where the player returns */
@@ -300,9 +316,10 @@ static void join(char *out, size_t n, const char *part)
 static void card_sub(const struct yt_item *it, char *out, size_t n)
 {
      char v[32], a[32];
+     snprintf(out, n, "%s", it->channel);
+     if (it->info[0]) { join(out, n, it->info); return; }    /* YouTube's own wording */
      fmt_views(it->views, v, sizeof v);
      fmt_ago(it->published, a, sizeof a);
-     snprintf(out, n, "%s", it->channel);
      join(out, n, v);
      join(out, n, a);
 }
@@ -378,7 +395,7 @@ static void build_cards(void)
                for (int i = 0; i < U.home.n; i++)
                     add_shelf(U.home.sh[i].title, U.home.sh[i].l.items, U.home.sh[i].l.n, 0);
           else if (U.tab == TAB_SEARCH) add_shelf("Results", U.srch.items, U.srch.n, 1);
-          else add_shelf("Watched", U.hist.items, U.hist.n, 1);
+          else if (U.tab == TAB_HISTORY) add_shelf("Watched", U.hist.items, U.hist.n, 1);
           for (int i = 0; i < U.nsh; i++) {
                struct shelf *h = &U.sh[i];
                h->sel = U.tsel[U.tab][i] < h->n ? U.tsel[U.tab][i] : 0;
@@ -758,6 +775,48 @@ static void apply(struct result *r, double now)
           U.dirty = 1;
           return;
      }
+     switch (r->kind) {                                  /* the account tab (any screen) */
+     case JB_ACCOUNT:
+          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; }
+          else set_err(r->err, now);
+          U.dirty = 1;
+          return;
+     case JB_SIGNIN:
+          U.busy = 0;
+          if (r->rc != 0) { set_err(r->err, now); return; }
+          snprintf(U.code, sizeof U.code, "%s", r->code);
+          snprintf(U.code_url, sizeof U.code_url, "%s", r->url);
+          U.next_poll = now + 5;
+          U.dirty = 1;
+          return;
+     case JB_POLL:
+          if (!U.code[0]) return;                         /* cancelled meanwhile */
+          if (r->rc != 0) { set_err(r->err, now); return; }   /* the helper hiccuped: keep polling */
+          if (r->flag > 0) {
+               U.code[0] = 0;
+               U.acct.signed_in = 1;
+               snprintf(U.acct.name, sizeof U.acct.name, "%s", r->acct.name);
+               snprintf(U.toast, sizeof U.toast, "Signed in%s%s", r->acct.name[0] ? " as " : "", r->acct.name);
+               U.toast_until = now + 4;
+               U.home_stale = 1;
+          } else if (r->flag < 0) {
+               U.code[0] = 0;
+               set_err(r->err[0] ? r->err : "Sign-in did not complete", now);
+          }
+          U.dirty = 1;
+          return;
+     case JB_SIGNOUT:
+          if (r->rc != 0) { set_err(r->err, now); return; }
+          memset(&U.acct, 0, sizeof U.acct);
+          U.acct_known = 1;
+          U.home_stale = 1;
+          snprintf(U.toast, sizeof U.toast, "Signed out");
+          U.toast_until = now + 3;
+          U.dirty = 1;
+          return;
+     default:
+          break;
+     }
      if (stale) return;
      U.busy = 0;
      U.dirty = 1;
@@ -875,6 +934,13 @@ int ytui_tick(double now)
                U.dirty = 1;
           }
      }
+     /* a sign-in code on show: ask the helper every 5 s whether it was entered */
+     if (U.on && U.code[0] && now >= U.next_poll) {
+          U.next_poll = now + 5;
+          struct job j = { .kind = JB_POLL };
+          post(j);
+     }
+     if (U.confirm_until && now >= U.confirm_until) { U.confirm_until = 0; U.dirty = 1; }
      if (U.toast_until && now >= U.toast_until) { U.toast_until = 0; U.dirty = 1; }
      if (U.err_until && now >= U.err_until) { U.err_until = 0; U.dirty = 1; }
      if (U.on && U.scr == Y_HOME && U.tab == TAB_SEARCH && U.query_at && now >= U.query_at) {
@@ -1070,6 +1136,11 @@ static void set_tab(int t)
      }
      if (t == TAB_HOME && U.home_stale) load_home();
      if (t == TAB_SEARCH) U.kb_focus = 1;
+     if (t == TAB_ACCOUNT) {
+          struct job j = { .kind = JB_ACCOUNT };
+          post(j);
+          U.confirm_until = 0;
+     }
      build_cards();
      U.dirty = 1;
 }
@@ -1082,6 +1153,7 @@ static int tab_key(int k, int repeat)
      case DIKS_CURSOR_DOWN: case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
           if (repeat) return 1;
           if (U.tab == TAB_SEARCH) { U.tab_focus = 0; U.kb_focus = 1; }
+          else if (U.tab == TAB_ACCOUNT) U.tab_focus = 0;
           else if (U.nsh) U.tab_focus = 0;
           break;
      case DIKS_BACK: case DIKS_EXIT:
@@ -1133,10 +1205,48 @@ static int kb_key(int k, int repeat, double now)
      return 1;
 }
 
+/* the account tab: one button (Sign in, Cancel, or Sign out with a second OK) */
+static int account_key(int k, int repeat, double now)
+{
+     switch (k) {
+     case DIKS_CURSOR_UP:
+          U.tab_focus = 1;
+          U.confirm_until = 0;
+          break;
+     case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
+          if (repeat) return 1;
+          if (U.code[0]) {                               /* Cancel */
+               U.code[0] = 0;
+          } else if (U.acct.signed_in) {
+               if (U.confirm_until > now) {
+                    U.confirm_until = 0;
+                    struct job j = { .kind = JB_SIGNOUT };
+                    post(j);
+               } else {
+                    U.confirm_until = now + 4;
+               }
+          } else if (!U.busy) {
+               struct job j = { .kind = JB_SIGNIN };
+               post_browse(j, "Asking YouTube for a code\xe2\x80\xa6");
+          }
+          break;
+     case DIKS_BACK: case DIKS_EXIT:
+          if (repeat) return 1;
+          set_tab(TAB_HOME);
+          U.tab_focus = 1;
+          break;
+     default:
+          return 1;
+     }
+     U.dirty = 1;
+     return 1;
+}
+
 static int card_key(int k, int repeat, double now)
 {
      if (U.scr == Y_HOME) {
           if (U.tab_focus) return tab_key(k, repeat);
+          if (U.tab == TAB_ACCOUNT) return account_key(k, repeat, now);
           if (U.tab == TAB_SEARCH && (U.kb_focus || !U.nsh)) return kb_key(k, repeat, now);
           if (U.tab != TAB_HOME && (k == DIKS_BACK || k == DIKS_EXIT)) {
                if (!repeat) { set_tab(TAB_HOME); U.tab_focus = 1; }
@@ -1367,7 +1477,7 @@ static void draw_cards(struct canvas *c)
 
 static void draw_tabs(struct canvas *c)
 {
-     static const char *const names[NTABS] = { "Home", "Search", "History" };
+     static const char *const names[NTABS] = { "Home", "Search", "History", "Account" };
      int W = U.h.W, w[NTABS], tw = 0, gap = 56;
      for (int t = 0; t < NTABS; t++) {
           w[t] = (int)strlen(names[t]) * 20;
@@ -1419,6 +1529,59 @@ static void draw_search(struct canvas *c)
           const char *msg = strlen(U.query) < 2 ? "Type to search YouTube"
                           : (U.srch_done && !U.query_at) ? "Nothing found" : "Searching\xe2\x80\xa6";
           text(U.h.f_item, SR_X, C_TOP, 72, K_TEXT2, msg, -1);
+     }
+}
+
+static void draw_account(struct canvas *c, double now)
+{
+     int x = C_X0, y = C_TOP + 40, W = U.h.W;
+     const char *btn;
+     if (U.code[0]) {
+          if (!c) {
+               text(U.h.f_item, x, y, 56, K_TEXT2, "On your phone or computer, go to", -1);
+               text(U.h.f_head, x, y + 64, 70, K_TEXT,
+                    U.code_url[0] ? U.code_url + (strncmp(U.code_url, "https://", 8) ? 0 : 8) : "youtube.com/activate", -1);
+               text(U.h.f_item, x, y + 150, 56, K_TEXT2, "and enter this code:", -1);
+               text(U.h.f_title, x + 40, y + 230, 150, K_TEXT, U.code, -1);
+               text(U.h.f_small, x, y + 410, 40, K_TEXT3, "Waiting for you to approve it\xe2\x80\xa6", -1);
+          } else {
+               gfx_rrect(c, x, y + 222, 640, 166, 28, K_CARD);
+               gfx_rrect_outline(c, x, y + 222, 640, 166, 28, 1, K_PANEL_EDGE);
+          }
+          btn = "Cancel";
+          y += 480;
+     } else if (U.acct.signed_in) {
+          if (!c) {
+               char t[160];
+               snprintf(t, sizeof t, "Signed in%s%s", U.acct.name[0] ? " as " : "", U.acct.name);
+               text(U.h.f_head, x, y, 70, K_TEXT, t, -1);
+               wrap(U.h.f_item, "Home shows your subscriptions and YouTube's recommendations. Videos "
+                    "played here are not added to your YouTube history.", x, y + 90, 50, W - 2 * C_X0, 3, K_TEXT2);
+          }
+          btn = U.confirm_until > now ? "Press OK again to sign out" : "Sign out";
+          y += 260;
+     } else {
+          if (!c) {
+               text(U.h.f_head, x, y, 70, K_TEXT, U.acct_known ? "Not signed in" : "Checking\xe2\x80\xa6", -1);
+               wrap(U.h.f_item, "Sign in with your YouTube account to see your subscriptions and "
+                    "recommendations on Home. You approve it on your phone; no password is typed here.",
+                    x, y + 90, 50, W - 2 * C_X0, 3, K_TEXT2);
+          }
+          btn = "Sign in";
+          y += 260;
+     }
+     int bw = (int)strlen(btn) * 18;
+     if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, btn, -1, &bw);
+     bw += 72;
+     int foc = !U.tab_focus;
+     if (c) {
+          if (foc) gfx_rrect(c, x, y, bw, 72, 36, 0xffffffff);
+          else {
+               gfx_rrect(c, x, y, bw, 72, 36, 0x40ffffff);
+               gfx_rrect_outline(c, x, y, bw, 72, 36, 1, 0x40ffffff);
+          }
+     } else {
+          text(U.h.f_bold, x + bw / 2, y, 72, foc ? 0xff0b0e16 : K_TEXT, btn, 0);
      }
 }
 
@@ -1570,6 +1733,7 @@ void ytui_draw(struct canvas *c, double now)
      if (U.scr == Y_HOME) {
           draw_tabs(c);
           if (U.tab == TAB_SEARCH) draw_search(c);
+          else if (U.tab == TAB_ACCOUNT) draw_account(c, now);
           else if (!c && !U.nsh && !U.busy) {
                const char *msg = U.tab == TAB_HISTORY ? "Nothing watched yet"
                                : U.home_loaded ? "Search for a video and play it; in the player, press DOWN and"

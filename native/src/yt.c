@@ -106,6 +106,7 @@ static void item_of(const cJSON *o, struct yt_item *it)
      snprintf(it->channel, sizeof it->channel, "%s", str(o, "channel"));
      snprintf(it->channel_id, sizeof it->channel_id, "%s", str(o, "channel_id"));
      snprintf(it->published, sizeof it->published, "%s", str(o, "published"));
+     snprintf(it->info, sizeof it->info, "%s", str(o, "info"));
      it->duration = (int)num(o, "duration");
      it->views = (long long)num(o, "views");
      it->live = flag(o, "live");
@@ -251,6 +252,56 @@ int yt_progress(const char *id, double pos, double dur)
      cJSON *j = call("POST", path, 10000);
      cJSON_Delete(j);
      return j ? 0 : -1;
+}
+
+int yt_account(struct yt_account *out)
+{
+     memset(out, 0, sizeof *out);
+     cJSON *j = call("GET", "/api/account", 15000);
+     if (!j) return -1;
+     out->signed_in = flag(j, "signed_in");
+     out->pending = flag(j, "pending");
+     snprintf(out->name, sizeof out->name, "%s", str(j, "name"));
+     cJSON_Delete(j);
+     return 0;
+}
+
+int yt_signin_start(char *code, int code_n, char *url, int url_n)
+{
+     cJSON *j = call("POST", "/api/signin/start", 30000);
+     if (!j) return -1;
+     snprintf(code, (size_t)code_n, "%s", str(j, "user_code"));
+     snprintf(url, (size_t)url_n, "%s", str(j, "url"));
+     cJSON_Delete(j);
+     if (!code[0]) { set_err("no sign-in code"); return -1; }
+     return 0;
+}
+
+int yt_signin_poll(int *status, char *name, int name_n)
+{
+     *status = 0;
+     name[0] = 0;
+     cJSON *j = call("GET", "/api/signin/poll", 30000);
+     if (!j) return -1;
+     const char *st = str(j, "status");
+     if (!strcmp(st, "done")) {
+          *status = 1;
+          snprintf(name, (size_t)name_n, "%s", str(j, "name"));
+     } else if (strcmp(st, "pending")) {
+          *status = -1;
+          set_err("%s", !strcmp(st, "expired") ? "The code expired" :
+                        str(j, "error")[0] ? str(j, "error") : "Sign-in was refused");
+     }
+     cJSON_Delete(j);
+     return 0;
+}
+
+int yt_signout(void)
+{
+     cJSON *j = call("POST", "/api/signout", 15000);
+     int ok = j != NULL;
+     cJSON_Delete(j);
+     return ok ? 0 : -1;
 }
 
 int yt_follow(const char *cid, int on)

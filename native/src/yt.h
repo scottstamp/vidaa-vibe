@@ -24,6 +24,7 @@ struct yt_item {
      int  duration;            /* seconds; 0 = live or unknown */
      long long views;
      char published[16];       /* YYYY-MM-DD or "" */
+     char info[100];           /* ready-made "1.2M views · 3 days ago" (YouTube's feeds), or "" */
      int  live;
      double position;          /* seconds watched (helper's record), 0 = none */
 };
@@ -85,6 +86,18 @@ int  yt_channel(const char *id, int n, struct yt_channel *out);
 int  yt_video(const char *id, struct yt_video *out);
 int  yt_play(const char *id, int maxh, struct yt_play *out);
 int  yt_progress(const char *id, double pos, double dur);
+
+/* the YouTube account (sign-in by device code, in the helper) */
+struct yt_account {
+     int  signed_in, pending;
+     char name[100];
+};
+int  yt_account(struct yt_account *out);
+/* start: the code to show and where to enter it */
+int  yt_signin_start(char *code, int code_n, char *url, int url_n);
+/* poll: *status 0 pending, 1 done (name set), -1 expired or refused (yt_error) */
+int  yt_signin_poll(int *status, char *name, int name_n);
+int  yt_signout(void);
 int  yt_follow(const char *channel_id, int on);
 
 /* image URLs on the helper (out >= 256 bytes); size 'm' 320x180, 'l' 1280x720 */

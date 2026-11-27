@@ -306,6 +306,289 @@ def play_info(vid, maxh, base):
                     "live": live}
     raise LookupError("no playable format")
 
+# ------------------------------------------------------------------ account
+#
+# Sign-in as SmartTube does it (its MediaServiceCore, auth/V2): the YouTube TV
+# app's OAuth client (id and secret read from the TV page's base.js), the
+# device-code flow (the TV shows a code for youtube.com/activate), then
+# InnerTube requests as the TVHTML5 client with the bearer token. Google may
+# change or block any of this; nothing else in the helper depends on it.
+# The refresh token lives in the state file (only the helper's user reads it).
+
+TV_UA = ("Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), "
+         "Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)")
+OAUTH_SCOPE = "http://gdata.youtube.com https://www.googleapis.com/auth/youtube-paid-content"
+DEVICE_GRANT = "http://oauth.net/grant_type/device/1.0"
+TV_CACHE = Cache(12 * 3600, 4)
+AUTH_LOCK = threading.Lock()
+PENDING = {}            # the sign-in in progress: device_code, user_code, url, until, interval
+
+def tv_get(url):
+    return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": TV_UA}),
+                                  timeout=20).read().decode("utf-8", "replace")
+
+def tv_client():
+    """{client_id, client_secret, version} of the YouTube TV app (cached)"""
+    c = TV_CACHE.get("client")
+    if c:
+        return c
+    page = tv_get("https://www.youtube.com/tv")
+    m = (re.search(r'id="base-js" src="(.*?)"', page) or re.search(r"\.src = '(.*?m=base)'", page)
+         or re.search(r"\.src = '(.*?)'; .\.id = 'base-js'", page))
+    ver = re.search(r'"clientVersion":"([\d.]+)"', page) or re.search(r'"INNERTUBE_CLIENT_VERSION":"([\d.]+)"', page)
+    if not m:
+        raise LookupError("YouTube TV page changed: no base.js")
+    url = m.group(1).replace("\\/", "/")
+    if url.startswith("/"):
+        url = "https://www.youtube.com" + url
+    js = tv_get(url)
+    cid = re.search(r'clientId:"([-\w]+\.apps\.googleusercontent\.com)",\n?[$\w]+:"(\w+)"', js)
+    if not cid:
+        raise LookupError("YouTube TV app changed: no OAuth client in base.js")
+    return TV_CACHE.put("client", {"client_id": cid.group(1), "client_secret": cid.group(2),
+                                   "version": ver.group(1) if ver else "7.20261123.19.00"})
+
+def post_json(url, body, headers=None):
+    h = {"User-Agent": TV_UA, "Content-Type": "application/json"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers=h)
+    try:
+        return json.load(urllib.request.urlopen(req, timeout=20))
+    except urllib.error.HTTPError as e:
+        try:
+            return json.load(e)
+        except Exception:
+            raise e
+
+def auth_state():
+    with STATE.lock:
+        return dict(STATE.d.get("auth") or {})
+
+def auth_save(a):
+    with STATE.lock:
+        if a:
+            STATE.d["auth"] = a
+        else:
+            STATE.d.pop("auth", None)
+        STATE.save()
+
+def device_id():
+    with STATE.lock:
+        if not STATE.d.get("device_id"):
+            import uuid
+            STATE.d["device_id"] = str(uuid.uuid4())
+            STATE.save()
+        return STATE.d["device_id"]
+
+def signin_start():
+    c = tv_client()
+    r = post_json("https://www.youtube.com/o/oauth2/device/code",
+                  {"client_id": c["client_id"], "device_id": device_id(), "model_name": "ytlr::",
+                   "scope": OAUTH_SCOPE})
+    if "user_code" not in r:
+        raise LookupError("sign-in refused: %s" % (r.get("error_description") or r.get("error") or r))
+    with AUTH_LOCK:
+        PENDING.clear()
+        PENDING.update({"device_code": r["device_code"], "user_code": r["user_code"],
+                        "url": r.get("verification_url", "https://www.youtube.com/activate"),
+                        "until": time.time() + int(r.get("expires_in", 1800)),
+                        "interval": int(r.get("interval", 5))})
+    return {"user_code": r["user_code"], "url": PENDING["url"], "expires_in": int(r.get("expires_in", 1800))}
+
+def signin_poll():
+    with AUTH_LOCK:
+        p = dict(PENDING)
+    if not p:
+        return {"status": "none"}
+    if time.time() > p["until"]:
+        with AUTH_LOCK:
+            PENDING.clear()
+        return {"status": "expired"}
+    c = tv_client()
+    r = post_json("https://www.youtube.com/o/oauth2/token",
+                  {"code": p["device_code"], "client_id": c["client_id"],
+                   "client_secret": c["client_secret"], "grant_type": DEVICE_GRANT})
+    if r.get("error") in ("authorization_pending", "slow_down"):
+        return {"status": "pending"}
+    if "refresh_token" not in r:
+        with AUTH_LOCK:
+            PENDING.clear()
+        return {"status": "error", "error": r.get("error_description") or r.get("error") or "refused"}
+    with AUTH_LOCK:
+        PENDING.clear()
+    a = {"refresh_token": r["refresh_token"], "access_token": r.get("access_token", ""),
+         "expires": time.time() + int(r.get("expires_in", 3600)) - 60}
+    auth_save(a)
+    name = account_name()
+    if name:
+        a["name"] = name
+        auth_save(a)
+    LIST_CACHE.d.clear()
+    return {"status": "done", "name": name}
+
+def access_token():
+    a = auth_state()
+    if not a.get("refresh_token"):
+        return None
+    if a.get("access_token") and time.time() < a.get("expires", 0):
+        return a["access_token"]
+    c = tv_client()
+    r = post_json("https://www.youtube.com/o/oauth2/token",
+                  {"refresh_token": a["refresh_token"], "client_id": c["client_id"],
+                   "client_secret": c["client_secret"], "grant_type": "refresh_token"})
+    if "access_token" not in r:
+        print("auth: refresh failed:", r.get("error"), file=sys.stderr)
+        if r.get("error") == "invalid_grant":      # revoked: signed out
+            auth_save(None)
+        return None
+    a["access_token"] = r["access_token"]
+    a["expires"] = time.time() + int(r.get("expires_in", 3600)) - 60
+    auth_save(a)
+    return a["access_token"]
+
+def innertube(endpoint, body):
+    tok = access_token()
+    c = tv_client()
+    b = {"context": {"client": {"clientName": "TVHTML5", "clientVersion": c["version"], "hl": "en", "gl": "CA"}}}
+    b.update(body)
+    h = {"Origin": "https://www.youtube.com", "Referer": "https://www.youtube.com/tv"}
+    if tok:
+        h["Authorization"] = "Bearer " + tok
+    return post_json("https://www.youtube.com/youtubei/v1/%s?prettyPrint=false" % endpoint, b, h)
+
+def text_of(o):
+    if not isinstance(o, dict):
+        return ""
+    if "simpleText" in o:
+        return o["simpleText"]
+    return "".join(r.get("text", "") for r in o.get("runs", []))
+
+def find(o, key):
+    if isinstance(o, dict):
+        if key in o:
+            return o[key]
+        for v in o.values():
+            r = find(v, key)
+            if r is not None:
+                return r
+    elif isinstance(o, list):
+        for v in o:
+            r = find(v, key)
+            if r is not None:
+                return r
+    return None
+
+def clock_secs(s):
+    try:
+        n = 0
+        for part in s.strip().split(":"):
+            n = n * 60 + int(part)
+        return n
+    except ValueError:
+        return 0
+
+def tile_item(t):
+    """a TV tileRenderer -> a card item, or None (shorts, movies, playlists)"""
+    we = find(t.get("onSelectCommand", {}), "watchEndpoint")
+    vid = (we or {}).get("videoId") or ""
+    if len(vid) != 11 or find(t.get("onSelectCommand", {}), "reelWatchEndpoint"):
+        return None
+    meta = (t.get("metadata") or {}).get("tileMetadataRenderer") or {}
+    lines = []
+    for ln in meta.get("lines") or []:
+        parts = [text_of((i.get("lineItemRenderer") or {}).get("text"))
+                 for i in (ln.get("lineRenderer") or {}).get("items") or []]
+        s = " ".join(p for p in parts if p and p.strip() not in ("•", "·")).strip()
+        if s:
+            lines.append(s)
+    overlays = ((t.get("header") or {}).get("tileHeaderRenderer") or {}).get("thumbnailOverlays") or []
+    badge, style, pct = "", "", 0
+    for ov in overlays:
+        ts = ov.get("thumbnailOverlayTimeStatusRenderer")
+        if ts:
+            badge, style = text_of(ts.get("text")), ts.get("style", "")
+        rp = ov.get("thumbnailOverlayResumePlaybackRenderer")
+        if rp:
+            pct = rp.get("percentDurationWatched", 0)
+    if style == "SHORTS":
+        return None
+    dur = clock_secs(badge) if ":" in badge else 0
+    it = {"id": vid, "title": text_of(meta.get("title")), "channel": lines[0] if lines else "",
+          "channel_id": "", "duration": dur, "views": 0, "published": "",
+          "info": " · ".join(lines[1:])[:90], "live": style == "LIVE"}
+    p = STATE.progress(vid)
+    if p:
+        it["position"] = p.get("pos", 0)
+    elif pct and dur:
+        it["position"] = dur * pct / 100.0
+    return it
+
+def tv_shelves(browse_id, default_title):
+    """[(title, items)] from a TV browse page"""
+    d = innertube("browse", {"browseId": browse_id})
+    shelves, seen = [], set()
+    def walk(o, title):
+        if isinstance(o, dict):
+            if "shelfRenderer" in o:
+                sh = o["shelfRenderer"]
+                t = text_of(find(sh.get("headerRenderer") or {}, "title") or {}) or title
+                items = []
+                def tiles(x):
+                    if isinstance(x, dict):
+                        if "tileRenderer" in x:
+                            it = tile_item(x["tileRenderer"])
+                            if it and it["id"] not in seen:
+                                seen.add(it["id"])
+                                items.append(it)
+                            return
+                        for v in x.values():
+                            tiles(v)
+                    elif isinstance(x, list):
+                        for v in x:
+                            tiles(v)
+                tiles(sh.get("content"))
+                if items:
+                    shelves.append((t, items))
+                return
+            if "tileRenderer" in o:                     # tiles outside a shelf (a grid)
+                it = tile_item(o["tileRenderer"])
+                if it and it["id"] not in seen:
+                    seen.add(it["id"])
+                    if not shelves or shelves[-1][0] != title:
+                        shelves.append((title, []))
+                    shelves[-1][1].append(it)
+                return
+            for v in o.values():
+                walk(v, title)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, title)
+    walk(d, default_title)
+    return shelves
+
+def account_name():
+    try:
+        d = innertube("account/accounts_list", {"accountReadMask": {"returnOwner": True,
+                                                                    "returnBrandAccounts": True,
+                                                                    "returnPersonaAccounts": False}})
+        n = find(d, "accountName")
+        return text_of(n) if isinstance(n, dict) else (n or "")
+    except Exception as e:
+        print("auth: account name:", e, file=sys.stderr)
+        return ""
+
+def account():
+    a = auth_state()
+    return {"signed_in": bool(a.get("refresh_token")), "name": a.get("name", ""),
+            "pending": bool(PENDING)}
+
+def signout():
+    """forget the tokens here (the TV's sign-in can also be removed in the
+    Google account's security settings)"""
+    auth_save(None)
+    LIST_CACHE.d.clear()
+    return {"ok": True}
+
 # ------------------------------------------------------------------ images
 
 def fetch_bytes(url):
@@ -346,6 +629,19 @@ def home():
     cont = STATE.recent(20, unfinished_only=True)
     if cont:
         shelves.append({"title": "Continue watching", "items": cont})
+    if account()["signed_in"]:
+        for bid, title in (("FEsubscriptions", "Subscriptions"), ("FEwhat_to_watch", "Recommended")):
+            k = ("tv", bid)
+            got = LIST_CACHE.get(k)
+            if got is None:
+                try:
+                    got = LIST_CACHE.put(k, tv_shelves(bid, title))
+                except Exception as e:
+                    print("home: %s: %s" % (bid, e), file=sys.stderr)
+                    got = []
+            for t, items in got[:6]:
+                shelves.append({"title": t if bid == "FEwhat_to_watch" or t == title else "%s: %s" % (title, t),
+                                "items": with_positions(items)[:30]})
     for c in STATE.follows():
         try:
             ch = channel(c["id"], 16)
@@ -395,6 +691,14 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, play_info(vid, int(q.get("maxh", 1080)), self.base()))
             if p == "/api/history":
                 return self.send(200, {"items": STATE.recent(int(q.get("n", 60)), False)})
+            if p == "/api/account":
+                return self.send(200, account())
+            if p == "/api/signin/start" and self.command == "POST":
+                return self.send(200, signin_start())
+            if p == "/api/signin/poll":
+                return self.send(200, signin_poll())
+            if p == "/api/signout" and self.command == "POST":
+                return self.send(200, signout())
             if p == "/api/following":
                 return self.send(200, {"items": STATE.follows()})
             if p == "/api/progress" and self.command == "POST":
