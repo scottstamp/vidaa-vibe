@@ -164,7 +164,8 @@ def item_of(e):
     return it
 
 def with_positions(items):
-    """cached lists carry the positions of when they were made: current ones"""
+    """cached lists carry the positions of when they were made: current ones;
+    and, with the DeArrow setting on, the community's titles"""
     out = []
     for it in items:
         it = dict(it)
@@ -172,7 +173,69 @@ def with_positions(items):
         if p:
             it["position"] = p.get("pos", 0)
         out.append(it)
+    if setting("dearrow"):
+        brand_many([it["id"] for it in out])
+        for it in out:
+            b = DA_CACHE.get(it["id"])
+            if b and b.get("title"):
+                it["title"] = b["title"]
     return out
+
+# ------------------------------------------------------------------ settings, DeArrow
+
+def setting(name):
+    with STATE.lock:
+        return bool((STATE.d.get("settings") or {}).get(name))
+
+def set_setting(name, on):
+    with STATE.lock:
+        STATE.d.setdefault("settings", {})[name] = bool(on)
+        STATE.save()
+
+DA_API = "https://sponsor.ajay.app/api/branding/"
+DA_THUMB = "https://dearrow-thumb.ajay.app/api/v1/getThumbnail"
+DA_CACHE = Cache(24 * 3600, 4000)
+
+def brand_of(entry):
+    """DeArrow's pick from a branding entry: the first title and thumbnail that
+    is not the original and is locked or not voted down (as the extension)"""
+    title, ttime = "", None
+    for t in entry.get("titles") or []:
+        if not t.get("original") and (t.get("locked") or t.get("votes", 0) >= 0) and t.get("title"):
+            title = t["title"].replace(">", "").strip()
+            break
+    for t in entry.get("thumbnails") or []:
+        if not t.get("original") and (t.get("locked") or t.get("votes", 0) >= 0) and t.get("timestamp") is not None:
+            ttime = float(t["timestamp"])
+            break
+    return {"title": title, "time": ttime}
+
+def brand(vid):
+    b = DA_CACHE.get(vid)
+    if b is not None:
+        return b
+    prefix = hashlib.sha256(vid.encode()).hexdigest()[:4]     # k-anonymous lookup
+    try:
+        req = urllib.request.Request(DA_API + prefix, headers={"User-Agent": "vidaa-vibe ythelper"})
+        data = json.load(urllib.request.urlopen(req, timeout=8))
+        for k, v in (data or {}).items():               # cache every video the prefix answered for
+            if len(k) == 11:
+                DA_CACHE.put(k, brand_of(v))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            print("dearrow:", e, file=sys.stderr)
+    except Exception as e:
+        print("dearrow:", e, file=sys.stderr)
+    b = DA_CACHE.get(vid)
+    return b if b is not None else DA_CACHE.put(vid, {"title": "", "time": None})
+
+def brand_many(ids):
+    todo = [v for v in dict.fromkeys(ids) if DA_CACHE.get(v) is None]
+    if not todo:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as ex:
+        list(ex.map(brand, todo))
 
 def is_video_entry(e):
     return len(e.get("id") or "") == 11 and e.get("ie_key", "Youtube") in ("Youtube", None)
@@ -247,6 +310,10 @@ def details(vid):
     it["segments"] = sponsor_segments(vid)
     it["followed"] = STATE.is_followed(it["channel_id"])
     it.setdefault("position", 0)
+    if setting("dearrow"):
+        b = brand(vid)
+        if b.get("title"):
+            it["original_title"], it["title"] = it["title"], b["title"]
     return it
 
 # ------------------------------------------------------------------ HLS
@@ -285,13 +352,41 @@ def trimmed_master(vid, maxh):
     _, inf, uri = max(variants)
     group = (re.search(r'AUDIO="([^"]+)"', inf) or [None, None])[1]
     out = ["#EXTM3U"]
+    media = []
     for l in lines:
         if l.startswith("#EXT-X-INDEPENDENT-SEGMENTS"):
             out.append(l)
         elif l.startswith("#EXT-X-MEDIA") and (group is None or 'GROUP-ID="%s"' % group in l):
-            out.append(l)
+            media.append(l)
+    a = pick_audio(media)
+    if a:
+        out.append(a)
     out += [inf, uri]
     return "\n".join(out) + "\n"
+
+def pick_audio(media):
+    """One audio rendition, made the default. YouTube now auto-dubs videos
+    into many languages and marks none DEFAULT (the TV then played the first:
+    Arabic). Prefer: the English original, any English, the original in any
+    language, YouTube's DEFAULT, the first."""
+    if not media:
+        return None
+    def lang(l):
+        return ((re.search(r'LANGUAGE="([^"]*)"', l) or [None, ""])[1]).lower()
+    def original(l):
+        name = (re.search(r'NAME="([^"]*)"', l) or [None, ""])[1].lower()
+        return "original" in name or ("dubbed" not in name and "YT-EXT-AUDIO-CONTENT-ID" not in l)
+    tests = [lambda l: lang(l).startswith("en") and original(l),
+             lambda l: lang(l).startswith("en"),
+             original,
+             lambda l: "DEFAULT=YES" in l,
+             lambda l: True]
+    for t in tests:
+        for l in media:
+            if t(l):
+                l = re.sub(r"DEFAULT=(YES|NO)", "DEFAULT=YES", l)
+                return l if "DEFAULT=YES" in l else l + ",DEFAULT=YES"
+    return media[0]
 
 def play_info(vid, maxh, base):
     v = video(vid)
@@ -595,6 +690,25 @@ def tv_shelves(browse_id):
         out.append((t or "Recommended", items))
     return out
 
+def tv_playlist(browse_id, pages=2):
+    """a signed-in playlist page (VLWL Watch later, VLLL Liked): its videos,
+    with up to `pages` continuations"""
+    d = innertube("browse", {"browseId": browse_id})
+    seen = set()
+    items = tiles_in(d, seen, [])
+    tok = next_token(d)
+    for _ in range(pages):
+        if not tok:
+            break
+        try:
+            more = innertube("browse", {"continuation": tok})
+        except Exception as e:
+            print("%s: more: %s" % (browse_id, e), file=sys.stderr)
+            break
+        items += tiles_in(more.get("continuationContents") or more, seen, [])
+        tok = next_token(more.get("continuationContents") or {})
+    return items
+
 def account_name():
     try:
         d = innertube("account/accounts_list", {"accountReadMask": {"returnOwner": True,
@@ -624,7 +738,23 @@ def fetch_bytes(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
                                   timeout=10).read()
 
-def thumb(vid, size):
+def thumb(vid, size, dearrow=False):
+    if dearrow and setting("dearrow"):
+        t = brand(vid).get("time")
+        if t is not None:
+            k = (vid, "da", t)
+            b = THUMB_CACHE.get(k)
+            if b is None:
+                try:
+                    b = fetch_bytes("%s?%s" % (DA_THUMB, urllib.parse.urlencode({"videoID": vid, "time": t})))
+                    if b and (b[:2] == b"\xff\xd8" or b[:4] == b"\x89PNG"):
+                        THUMB_CACHE.put(k, b)
+                    else:
+                        b = None
+                except Exception:
+                    b = None                    # not rendered yet: YouTube's own
+            if b:
+                return b
     k = (vid, size)
     b = THUMB_CACHE.get(k)
     if b is None:
@@ -659,15 +789,19 @@ def home():
     if cont:
         shelves.append({"title": "Continue watching", "items": cont})
     if account()["signed_in"]:
-        for bid, title in (("FEsubscriptions", "Subscriptions"), ("FEwhat_to_watch", "Recommended")):
+        for bid, title in (("FEsubscriptions", "Subscriptions"), ("VLWL", "Watch later"),
+                           ("FEwhat_to_watch", "Recommended"), ("VLLL", "Liked videos")):
             k = ("tv", bid)
             got = LIST_CACHE.get(k)
             if got is None:
                 try:
-                    got = LIST_CACHE.put(k, tv_shelves(bid))
+                    got = LIST_CACHE.put(k, [(title, tv_playlist(bid))] if bid.startswith("VL")
+                                         else tv_shelves(bid))
                 except Exception as e:
                     print("home: %s: %s" % (bid, e), file=sys.stderr)
                     got = []
+            got = [(t, items) for t, items in got if items and
+                   not (bid == "FEwhat_to_watch" and "watch later" in t.lower())]   # its own shelf now
             for t, items in got[:8]:
                 shelves.append({"title": t, "items": with_positions(items)[:40]})
     for c in STATE.follows():
@@ -710,7 +844,7 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/home":
                 return self.send(200, home())
             if p == "/api/search":
-                return self.send(200, {"items": with_positions(search(q.get("q", ""), min(int(q.get("n", 24)), 60)))})
+                return self.send(200, {"items": with_positions(search(q.get("q", ""), min(int(q.get("n", 24)), 120)))})
             if p == "/api/channel":
                 return self.send(200, channel(vid, min(int(q.get("n", 48)), 120)))
             if p == "/api/video":
@@ -718,7 +852,12 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/play":
                 return self.send(200, play_info(vid, int(q.get("maxh", 1080)), self.base()))
             if p == "/api/history":
-                return self.send(200, {"items": STATE.recent(int(q.get("n", 60)), False)})
+                return self.send(200, {"items": with_positions(STATE.recent(int(q.get("n", 60)), False))})
+            if p == "/api/settings":
+                if self.command == "POST" and "dearrow" in q:
+                    set_setting("dearrow", q["dearrow"] == "1")
+                    LIST_CACHE.d.clear()
+                return self.send(200, {"dearrow": setting("dearrow")})
             if p == "/api/account":
                 return self.send(200, account())
             if p == "/api/signin/start" and self.command == "POST":
@@ -751,7 +890,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200 if t else 404, t or "no HLS", "application/x-mpegURL")
             m = re.match(r"^/thumb/([\w-]{11})\.jpg$", p)
             if m:
-                b = thumb(m.group(1), q.get("s", "m"))
+                b = thumb(m.group(1), q.get("s", "m"), q.get("da") == "1")
                 return self.send(200, b, "image/jpeg") if b else self.send(404, "none", "text/plain")
             m = re.match(r"^/avatar/([\w-]{24})\.jpg$", p)
             if m:

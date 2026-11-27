@@ -98,6 +98,11 @@ int  yt_signin_start(char *code, int code_n, char *url, int url_n);
 /* poll: *status 0 pending, 1 done (name set), -1 expired or refused (yt_error) */
 int  yt_signin_poll(int *status, char *name, int name_n);
 int  yt_signout(void);
+
+/* settings kept by the helper: DeArrow (community titles and thumbnails).
+ * set < 0 only reads. *dearrow gets the value; thumbnails ask for DeArrow's
+ * when it is on (yt_thumb_url). */
+int  yt_settings(int set_dearrow, int *dearrow);
 int  yt_follow(const char *channel_id, int on);
 
 /* image URLs on the helper (out >= 256 bytes); size 'm' 320x180, 'l' 1280x720 */

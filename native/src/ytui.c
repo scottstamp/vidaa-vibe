@@ -48,11 +48,12 @@
 /* ------------------------------------------------------------ the worker */
 
 enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW,
-                JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT };
+                JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT, JB_SETTINGS };
 
 struct job {
      enum job_kind kind;
      int  gen, flag, n;
+     int  count;                   /* JB_SEARCH: how many results */
      char id[32];
      char arg[200];
      double pos, dur;
@@ -133,7 +134,7 @@ static void *worker(void *arg)
           snprintf(r->id, sizeof r->id, "%s", j.id);
           switch (j.kind) {
           case JB_HOME:     r->rc = yt_home(&r->home); break;
-          case JB_SEARCH:   r->rc = yt_search(j.arg, 30, &r->list); break;
+          case JB_SEARCH:   r->rc = yt_search(j.arg, j.count ? j.count : 30, &r->list); break;
           case JB_HISTORY:  r->rc = yt_history(60, &r->list); break;
           case JB_CHANNEL:  r->rc = yt_channel(j.id, 60, &r->ch); break;
           case JB_OPEN:     /* the details (segments, position), then the stream */
@@ -143,7 +144,11 @@ static void *worker(void *arg)
           case JB_REPLAY:   r->rc = yt_play(j.id, j.n, &r->play); break;    /* another quality */
           case JB_PROGRESS: r->rc = yt_progress(j.id, j.pos, j.dur); break;
           case JB_FOLLOW:   r->rc = yt_follow(j.id, j.flag); break;
-          case JB_ACCOUNT:  r->rc = yt_account(&r->acct); break;
+          case JB_ACCOUNT:                              /* and the settings */
+               r->rc = yt_account(&r->acct);
+               if (r->rc == 0) yt_settings(-1, &r->n);
+               break;
+          case JB_SETTINGS: r->rc = yt_settings(j.flag, &r->n); break;
           case JB_SIGNIN:   r->rc = yt_signin_start(r->code, sizeof r->code, r->url, sizeof r->url); break;
           case JB_POLL:
                r->rc = yt_signin_poll(&r->flag, r->acct.name, sizeof r->acct.name);
@@ -199,7 +204,10 @@ static struct {
 
      /* the account tab: what the helper says; a sign-in in progress */
      struct yt_account acct;
-     int  acct_known, acct_focus;  /* acct_focus: its button has the focus */
+     int  acct_known;
+     int  set_sel;                 /* the Settings tab's focused button: 0 account, 1 DeArrow */
+     int  dearrow;                 /* the helper's DeArrow setting */
+     int  srch_count, srch_more;   /* results asked for; a "more" request out */
      char code[32], code_url[128];
      double next_poll, confirm_until;
 
@@ -730,6 +738,10 @@ void ytui_open(const struct jfui_host *h, double now)
           pthread_attr_destroy(&at);
      }
      if (!worker_up) { set_err("could not start the network thread", now); return; }
+     if (!U.acct_known) {                             /* the settings (DeArrow) shape thumbnail URLs */
+          struct job j = { .kind = JB_ACCOUNT };
+          post(j);
+     }
      U.scr = Y_HOME;
      U.tab = TAB_HOME;
      U.tab_focus = 1;
@@ -753,7 +765,11 @@ static void apply(struct result *r, double now)
      if (r->kind == JB_PROGRESS) return;
      if (r->kind == JB_SEARCH) {
           if (r->n != U.srch_gen) return;               /* an older query */
+          int more = U.srch_more;
+          U.srch_more = 0;
           if (r->rc != 0) { set_err(r->err, now); return; }
+          int keep = more && U.scr == Y_HOME && U.tab == TAB_SEARCH && U.nsh ? U.sh[0].sel : -1;
+          int vtop = U.vtop;
           yt_list_free(&U.srch);
           U.srch = r->list;
           r->list.items = NULL; r->list.n = 0;
@@ -761,6 +777,10 @@ static void apply(struct result *r, double now)
           memset(U.tsel[TAB_SEARCH], 0, sizeof U.tsel[TAB_SEARCH]);
           memset(U.tscroll[TAB_SEARCH], 0, sizeof U.tscroll[TAB_SEARCH]);
           U.tcur[TAB_SEARCH] = U.tvtop[TAB_SEARCH] = 0;
+          if (keep >= 0) {                              /* more of the same: stay put */
+               U.tsel[TAB_SEARCH][0] = keep < U.srch.n ? keep : 0;
+               U.tvtop[TAB_SEARCH] = vtop;
+          }
           if (U.scr == Y_HOME && U.tab == TAB_SEARCH) build_cards();
           U.dirty = 1;
           return;
@@ -777,8 +797,17 @@ static void apply(struct result *r, double now)
      }
      switch (r->kind) {                                  /* the account tab (any screen) */
      case JB_ACCOUNT:
-          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; }
+          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; U.dearrow = r->n; }
           else set_err(r->err, now);
+          U.dirty = 1;
+          return;
+     case JB_SETTINGS:
+          if (r->rc != 0) { set_err(r->err, now); return; }
+          U.dearrow = r->n;
+          U.home_stale = 1;                               /* titles and thumbnails change */
+          snprintf(U.toast, sizeof U.toast, U.dearrow ? "DeArrow on: community titles and thumbnails"
+                                                      : "DeArrow off: YouTube's own titles");
+          U.toast_until = now + 3;
           U.dirty = 1;
           return;
      case JB_SIGNIN:
@@ -947,7 +976,9 @@ int ytui_tick(double now)
           U.query_at = 0;
           U.srch_gen++;
           if (strlen(U.query) >= 2) {
-               struct job j = { .kind = JB_SEARCH, .n = U.srch_gen };
+               U.srch_count = 30;
+               U.srch_more = 0;
+               struct job j = { .kind = JB_SEARCH, .n = U.srch_gen, .count = U.srch_count };
                snprintf(j.arg, sizeof j.arg, "%s", U.query);
                post(j);
                U.srch_done = 0;
@@ -1210,11 +1241,21 @@ static int account_key(int k, int repeat, double now)
 {
      switch (k) {
      case DIKS_CURSOR_UP:
-          U.tab_focus = 1;
+          if (U.set_sel > 0) U.set_sel = 0;
+          else U.tab_focus = 1;
+          U.confirm_until = 0;
+          break;
+     case DIKS_CURSOR_DOWN:
+          U.set_sel = 1;
           U.confirm_until = 0;
           break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
           if (repeat) return 1;
+          if (U.set_sel == 1) {                          /* DeArrow on/off */
+               struct job j = { .kind = JB_SETTINGS, .flag = !U.dearrow };
+               post(j);
+               break;
+          }
           if (U.code[0]) {                               /* Cancel */
                U.code[0] = 0;
           } else if (U.acct.signed_in) {
@@ -1324,6 +1365,17 @@ static int card_key(int k, int repeat, double now)
           if (c >= 0 && c < U.nsh) U.cur = c;
      }
      cards_follow();
+     /* search results: near the end, 30 more (up to 120) */
+     if (U.scr == Y_HOME && U.tab == TAB_SEARCH && h->grid && !U.srch_more &&
+         U.srch.n >= U.srch_count && U.srch_count < 120 && h->sel >= h->n - per_line() && U.query[0]) {
+          U.srch_more = 1;
+          U.srch_count += 30;
+          struct job j = { .kind = JB_SEARCH, .n = U.srch_gen, .count = U.srch_count };
+          snprintf(j.arg, sizeof j.arg, "%s", U.query);
+          post(j);
+          snprintf(U.toast, sizeof U.toast, "Loading more\xe2\x80\xa6");
+          U.toast_until = now + 2;
+     }
      U.dirty = 1;
      return 1;
 }
@@ -1477,7 +1529,7 @@ static void draw_cards(struct canvas *c)
 
 static void draw_tabs(struct canvas *c)
 {
-     static const char *const names[NTABS] = { "Home", "Search", "History", "Account" };
+     static const char *const names[NTABS] = { "Home", "Search", "History", "Settings" };
      int W = U.h.W, w[NTABS], tw = 0, gap = 56;
      for (int t = 0; t < NTABS; t++) {
           w[t] = (int)strlen(names[t]) * 20;
@@ -1549,7 +1601,7 @@ static void draw_account(struct canvas *c, double now)
                gfx_rrect_outline(c, x, y + 222, 640, 166, 28, 1, K_PANEL_EDGE);
           }
           btn = "Cancel";
-          y += 480;
+          y += 430;
      } else if (U.acct.signed_in) {
           if (!c) {
                char t[160];
@@ -1570,18 +1622,32 @@ static void draw_account(struct canvas *c, double now)
           btn = "Sign in";
           y += 260;
      }
-     int bw = (int)strlen(btn) * 18;
-     if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, btn, -1, &bw);
-     bw += 72;
-     int foc = !U.tab_focus;
-     if (c) {
-          if (foc) gfx_rrect(c, x, y, bw, 72, 36, 0xffffffff);
-          else {
-               gfx_rrect(c, x, y, bw, 72, 36, 0x40ffffff);
-               gfx_rrect_outline(c, x, y, bw, 72, 36, 1, 0x40ffffff);
+     for (int b = 0; b < 2; b++) {
+          const char *t = btn;
+          int by = y;
+          if (b == 1) {                                  /* DeArrow, at the bottom */
+               by = 1080 - 230;
+               t = U.dearrow ? "DeArrow: On" : "DeArrow: Off";
+               if (!c) {
+                    text(U.h.f_bold, x, by - 150, 50, K_TEXT, "DeArrow", -1);
+                    wrap(U.h.f_small, "Community-submitted titles and thumbnails in place of clickbait "
+                         "(dearrow.ajay.app). Only a short hash prefix of each video id is sent.",
+                         x, by - 96, 40, W - 2 * C_X0, 2, K_TEXT2);
+               }
           }
-     } else {
-          text(U.h.f_bold, x + bw / 2, y, 72, foc ? 0xff0b0e16 : K_TEXT, btn, 0);
+          int bw = (int)strlen(t) * 18;
+          if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, t, -1, &bw);
+          bw += 72;
+          int foc = !U.tab_focus && U.set_sel == b;
+          if (c) {
+               if (foc) gfx_rrect(c, x, by, bw, 72, 36, 0xffffffff);
+               else {
+                    gfx_rrect(c, x, by, bw, 72, 36, 0x40ffffff);
+                    gfx_rrect_outline(c, x, by, bw, 72, 36, 1, 0x40ffffff);
+               }
+          } else {
+               text(U.h.f_bold, x + bw / 2, by, 72, foc ? 0xff0b0e16 : K_TEXT, t, 0);
+          }
      }
 }
 
@@ -1595,11 +1661,11 @@ static void draw_toast(struct canvas *c, double now)
 }
 
 /* the player's overlay: details, the bar with SponsorBlock on it, actions */
-#define O_TOP 640                     /* the panel: 640..1040 */
+#define O_TOP 600                     /* the panel: 600..1040 (hints in its last 70 px) */
 static void draw_overlay(struct canvas *c, double now)
 {
      int W = U.h.W, H = U.h.H;
-     int bx = 110, bw = W - 220, by = 900;
+     int bx = 110, bw = W - 220, by = O_TOP + 250;   /* bar; times and actions under it */
      double pos = U.seek_pending ? U.seek_target_ms : cur_pos(now);
      const struct yt_item *it = &U.playing;
      if (U.desc_on && U.have_det && U.det.description) {
@@ -1673,8 +1739,8 @@ static void draw_overlay(struct canvas *c, double now)
      }
      static const char *const hb[] = { "OK", "Pause", "LEFT/RIGHT", "Seek", "DOWN", "More", "BACK", "Hide" };
      static const char *const ha[] = { "LEFT/RIGHT", "Move", "OK", "Select", "UP", "Back to the bar" };
-     if (U.osd_focus) U.h.hints(U.h.ctx, c, W / 2, H - 100, ha, 3);
-     else U.h.hints(U.h.ctx, c, W / 2, H - 100, hb, 4);
+     if (U.osd_focus) U.h.hints(U.h.ctx, c, W / 2, H - 98, ha, 3);
+     else U.h.hints(U.h.ctx, c, W / 2, H - 98, hb, 4);
 }
 
 static void draw_player(struct canvas *c, double now)

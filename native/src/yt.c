@@ -313,9 +313,24 @@ int yt_follow(const char *cid, int on)
      return j ? 0 : -1;
 }
 
+static volatile int dearrow_on;    /* written by the worker, read by the UI: an int */
+
+int yt_settings(int set, int *dearrow)
+{
+     char path[64];
+     snprintf(path, sizeof path, set < 0 ? "/api/settings" : "/api/settings?dearrow=%d", set);
+     cJSON *j = call(set < 0 ? "GET" : "POST", path, 15000);
+     if (!j) return -1;
+     dearrow_on = flag(j, "dearrow");
+     if (dearrow) *dearrow = dearrow_on;
+     cJSON_Delete(j);
+     return 0;
+}
+
 void yt_thumb_url(const char *id, char size, char *out, int n)
 {
-     snprintf(out, (size_t)n, "%s/thumb/%s.jpg?s=%c", base, id, size);
+     /* &da=1: a different URL, so the image cache keeps both kinds apart */
+     snprintf(out, (size_t)n, "%s/thumb/%s.jpg?s=%c%s", base, id, size, dearrow_on ? "&da=1" : "");
 }
 
 void yt_list_free(struct yt_list *l)
