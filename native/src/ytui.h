@@ -18,6 +18,11 @@
 #include "jfui.h"
 
 int  ytui_available(void);
+/* at vibe-ui's start: the threads, so a linked phone can cast while the
+ * panel is closed */
+void ytui_start(void);
+/* a phone asked to play while the panel was closed: open it (once) */
+int  ytui_wants_open(void);
 void ytui_open(const struct jfui_host *h, double now);
 void ytui_close(double now);
 int  ytui_playing(void);

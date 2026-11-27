@@ -48,7 +48,8 @@
 /* ------------------------------------------------------------ the worker */
 
 enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW,
-                JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT, JB_SETTINGS };
+                JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT, JB_SETTINGS,
+                JB_RSTART, JB_RSTATUS, JB_RSTATE, JB_REMOTE /* a phone's command (remote thread) */ };
 
 struct job {
      enum job_kind kind;
@@ -70,7 +71,9 @@ struct result {
      struct yt_video vid;
      struct yt_play play;
      struct yt_account acct;
-     char code[32], url[128];      /* JB_SIGNIN */
+     char code[32], url[128];      /* JB_SIGNIN; JB_RSTART: code */
+     struct yt_cmd cmd;            /* JB_REMOTE */
+     char rconn[120];              /* JB_RSTATUS: the phones connected */
 };
 
 #define QMAX 32
@@ -149,6 +152,13 @@ static void *worker(void *arg)
                if (r->rc == 0) yt_settings(-1, &r->n);
                break;
           case JB_SETTINGS: r->rc = yt_settings(j.flag, &r->n); break;
+          case JB_RSTART:
+               r->rc = yt_remote_start(r->code, sizeof r->code);
+               if (r->rc == 0) yt_remote_status(&r->n, r->rconn, sizeof r->rconn);
+               break;
+          case JB_RSTATUS:  r->rc = yt_remote_status(&r->n, r->rconn, sizeof r->rconn); break;
+          case JB_RSTATE:   r->rc = yt_remote_state(j.id, j.pos, j.dur, j.arg); break;
+          case JB_REMOTE:   break;              /* made by the remote thread, never queued */
           case JB_SIGNIN:   r->rc = yt_signin_start(r->code, sizeof r->code, r->url, sizeof r->url); break;
           case JB_POLL:
                r->rc = yt_signin_poll(&r->flag, r->acct.name, sizeof r->acct.name);
@@ -208,6 +218,15 @@ static struct {
      int  set_sel;                 /* the Settings tab's focused button: 0 account, 1 DeArrow */
      int  dearrow;                 /* the helper's DeArrow setting */
      int  srch_count, srch_more;   /* results asked for; a "more" request out */
+
+     /* phone casting: the helper's state; a pairing code shown; a phone's
+      * "play" waiting for the panel to open; where it asked to start */
+     volatile int remote_enabled;
+     char rcode[32], rconn[120];
+     char pend_id[16];
+     double pend_pos, remote_start;
+     int  want_open;
+     const char *rstate_last;
      char code[32], code_url[128];
      double next_poll, confirm_until;
 
@@ -260,6 +279,67 @@ static void post_browse(struct job j, const char *msg)
      j.gen = ++U.gen;
      post(j);
      busy(msg);
+}
+
+/* phone casting: waits on the helper for the phone's commands (its own
+ * thread, so the 25 s long-poll never holds up the worker); a command is
+ * delivered as a JB_REMOTE result, applied by ytui_tick */
+static void *remote_thread(void *arg)
+{
+     (void)arg;
+     for (;;) {
+          if (!U.remote_enabled) { sleep(3); continue; }
+          struct result *r = calloc(1, sizeof *r);
+          if (!r) { sleep(5); continue; }
+          if (yt_remote_next(25, &r->cmd) != 0) { free(r); sleep(5); continue; }
+          if (!strcmp(r->cmd.cmd, "none")) { free(r); continue; }
+          r->kind = JB_REMOTE;
+          deliver(r);
+     }
+     return NULL;
+}
+
+static int start_thread(void *(*fn)(void *))
+{
+     pthread_t t;
+     pthread_attr_t at;
+     pthread_attr_init(&at);
+     pthread_attr_setstacksize(&at, 256 * 1024);
+     int ok = pthread_create(&t, &at, fn, NULL) == 0;
+     if (ok) pthread_detach(t);
+     pthread_attr_destroy(&at);
+     return ok;
+}
+
+/* the worker and the remote thread, once; what the helper's settings are */
+static void ensure_started(void)
+{
+     if (U.inited) return;
+     U.inited = 1;
+     U.to_fd = U.from_fd = -1;
+     U.tab_focus = 1;
+     U.speed = 100;
+     U.remote_start = -1;
+     yt_config_load();
+     worker_up = start_thread(worker);
+     start_thread(remote_thread);
+     if (worker_up) {
+          struct job a = { .kind = JB_ACCOUNT }, s = { .kind = JB_RSTATUS };
+          post(a);
+          post(s);
+     }
+}
+
+void ytui_start(void)
+{
+     if (ytui_available()) ensure_started();
+}
+
+int ytui_wants_open(void)
+{
+     int w = U.want_open;
+     U.want_open = 0;
+     return w;
 }
 
 int ytui_available(void) { return access(SWITCH_OFF, F_OK) != 0; }
@@ -575,6 +655,17 @@ static void report(double now)
      U.next_report = now + 10;
 }
 
+/* a phone linked: tell it what plays (on every change, and with report) */
+static void rstate(const char *state)
+{
+     if (!U.remote_enabled || !U.playing.id[0]) return;
+     struct job j = { .kind = JB_RSTATE, .pos = U.pos_ms / 1000.0, .dur = U.dur_ms / 1000.0 };
+     snprintf(j.id, sizeof j.id, "%s", U.playing.id);
+     snprintf(j.arg, sizeof j.arg, "%s", state);
+     post(j);
+     U.rstate_last = state;
+}
+
 /* the position shown on the card we came from, as it is now */
 static void update_cards_position(double pos_s)
 {
@@ -600,6 +691,7 @@ static void stop_playback(double now, int ended)
           report(now);
           update_cards_position(ended ? 0 : U.pos_ms / 1000.0);
      }
+     rstate("stopped");
      player_send("stop");
      player_reap();
      U.home_stale = 1;             /* Continue watching changed */
@@ -607,11 +699,18 @@ static void stop_playback(double now, int ended)
 }
 
 /* OK on a card: the player screen at once (loading), the helper's details
- * and stream next (JB_OPEN) */
+ * and stream next (JB_OPEN). Also for a phone's "play" while something
+ * plays: that one stops first (staying on the DMP path) */
 static void play_item(const struct yt_item *it)
 {
-     save_cards();
-     U.play_back = U.scr;
+     if (U.scr == Y_PLAYER || U.pid) {
+          if (U.pstate) report(0);
+          player_send("stop keep");
+          player_reap();
+     } else {
+          save_cards();
+          U.play_back = U.scr;
+     }
      U.playing = *it;
      yt_video_free(&U.det);
      memset(&U.det, 0, sizeof U.det);
@@ -642,8 +741,9 @@ static void on_player_line(char *l, double now)
                U.pstate = 1;
                if (!U.speed_set && U.speed != 100) player_send("speed %d", U.speed);
                U.speed_set = 1;
+               rstate("playing");
           }
-          else if (!strcmp(l + 6, "paused")) U.pstate = 2;
+          else if (!strcmp(l + 6, "paused")) { U.pstate = 2; rstate("paused"); }
           U.dirty = 1;
      } else if (!strncmp(l, "pos ", 4)) {
           double p = atof(l + 4);
@@ -721,32 +821,21 @@ void ytui_open(const struct jfui_host *h, double now)
      U.h = *h;
      U.on = 1;
      U.dirty = 1;
-     if (!U.inited) {
-          U.inited = 1;
-          U.to_fd = U.from_fd = -1;
-          U.tab_focus = 1;
-          U.speed = 100;
-          yt_config_load();
-          pthread_t t;
-          pthread_attr_t at;
-          pthread_attr_init(&at);
-          pthread_attr_setstacksize(&at, 256 * 1024);
-          if (pthread_create(&t, &at, worker, NULL) == 0) {
-               pthread_detach(t);
-               worker_up = 1;
-          }
-          pthread_attr_destroy(&at);
-     }
+     ensure_started();
      if (!worker_up) { set_err("could not start the network thread", now); return; }
-     if (!U.acct_known) {                             /* the settings (DeArrow) shape thumbnail URLs */
-          struct job j = { .kind = JB_ACCOUNT };
-          post(j);
-     }
      U.scr = Y_HOME;
      U.tab = TAB_HOME;
      U.tab_focus = 1;
      build_cards();
      if (!U.home_loaded || U.home_stale) load_home();
+     if (U.pend_id[0]) {                              /* a phone asked to play: now */
+          struct yt_item it;
+          memset(&it, 0, sizeof it);
+          snprintf(it.id, sizeof it.id, "%s", U.pend_id);
+          U.remote_start = U.pend_pos;
+          U.pend_id[0] = 0;
+          play_item(&it);
+     }
 }
 
 void ytui_close(double now)
@@ -801,6 +890,54 @@ static void apply(struct result *r, double now)
           else set_err(r->err, now);
           U.dirty = 1;
           return;
+     case JB_RSTART:
+          U.busy = 0;
+          if (r->rc != 0) { set_err(r->err, now); return; }
+          snprintf(U.rcode, sizeof U.rcode, "%s", r->code);
+          U.remote_enabled = r->n;
+          snprintf(U.rconn, sizeof U.rconn, "%s", r->rconn);
+          U.dirty = 1;
+          return;
+     case JB_RSTATUS:
+          if (r->rc == 0) {
+               U.remote_enabled = r->n;
+               snprintf(U.rconn, sizeof U.rconn, "%s", r->rconn);
+               U.dirty = 1;
+          }
+          return;
+     case JB_RSTATE:
+          return;
+     case JB_REMOTE: {                                   /* the phone's command */
+          const struct yt_cmd *m = &r->cmd;
+          fprintf(stderr, "youtube: remote %s %s %.0f\n", m->cmd, m->id, m->pos);
+          if (!strcmp(m->cmd, "play") && strlen(m->id) == 11) {
+               U.rcode[0] = 0;                            /* linked: the code is done */
+               if (U.on) {
+                    struct yt_item it;
+                    memset(&it, 0, sizeof it);
+                    snprintf(it.id, sizeof it.id, "%s", m->id);
+                    U.remote_start = m->pos > 0 ? m->pos : -1;
+                    play_item(&it);
+               } else {                                   /* vibe-ui opens the panel first */
+                    snprintf(U.pend_id, sizeof U.pend_id, "%s", m->id);
+                    U.pend_pos = m->pos > 0 ? m->pos : -1;
+                    U.want_open = 1;
+               }
+          } else if (U.scr == Y_PLAYER && U.on) {
+               if (!strcmp(m->cmd, "pause") && U.pstate == 1) player_send("pause");
+               else if (!strcmp(m->cmd, "resume") && U.pstate == 2) player_send("resume");
+               else if (!strcmp(m->cmd, "seek") && U.pstate && !U.live) {
+                    U.seek_pending = 0;
+                    player_send("seek %.0f", m->pos * 1000.0);
+                    U.pos_ms = m->pos * 1000.0;
+                    U.pos_at = now;
+                    U.osd_until = now + 4;
+                    rstate(U.pstate == 2 ? "paused" : "playing");
+               } else if (!strcmp(m->cmd, "stop")) stop_playback(now, 0);
+          }
+          U.dirty = 1;
+          return;
+     }
      case JB_SETTINGS:
           if (r->rc != 0) { set_err(r->err, now); return; }
           U.dearrow = r->n;
@@ -892,6 +1029,12 @@ static void apply(struct result *r, double now)
           const struct yt_item *it = &U.det.it;
           int resume = !U.live && it->position > 30 && (it->duration <= 0 || it->position < it->duration - 30);
           U.start_ms = resume ? it->position * 1000.0 : 0;
+          if (U.remote_start >= 0) {                  /* a phone said where */
+               resume = 0;
+               U.start_ms = U.live ? 0 : U.remote_start * 1000.0;
+               U.remote_start = -1;
+          }
+          rstate("loading");
           U.pos_ms = U.start_ms;
           U.pos_at = 0;
           U.pos_moved = 0;
@@ -950,7 +1093,7 @@ int ytui_tick(double now)
                     if (U.seek_target_ms / 1000.0 < U.det.segs[i].start) U.seg_done[i] = 0;
           }
           sponsor_tick(now);
-          if (U.pstate == 1 && now >= U.next_report) report(now);
+          if (U.pstate == 1 && now >= U.next_report) { report(now); rstate("playing"); }
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms + 3000) { stop_playback(now, 1); return U.on; }
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms - 15000 &&
               U.pos_moved > 0 && now - U.pos_moved > 6) { stop_playback(now, 1); return U.on; }
@@ -1168,8 +1311,9 @@ static void set_tab(int t)
      if (t == TAB_HOME && U.home_stale) load_home();
      if (t == TAB_SEARCH) U.kb_focus = 1;
      if (t == TAB_ACCOUNT) {
-          struct job j = { .kind = JB_ACCOUNT };
+          struct job j = { .kind = JB_ACCOUNT }, s = { .kind = JB_RSTATUS };
           post(j);
+          post(s);
           U.confirm_until = 0;
      }
      build_cards();
@@ -1236,24 +1380,32 @@ static int kb_key(int k, int repeat, double now)
      return 1;
 }
 
-/* the account tab: one button (Sign in, Cancel, or Sign out with a second OK) */
+/* the Settings tab: three rows (account, phone casting, DeArrow), one button
+ * each; UP/DOWN between them, OK presses */
+#define SET_ROWS 3
 static int account_key(int k, int repeat, double now)
 {
      switch (k) {
      case DIKS_CURSOR_UP:
-          if (U.set_sel > 0) U.set_sel = 0;
+          if (U.set_sel > 0) U.set_sel--;
           else U.tab_focus = 1;
           U.confirm_until = 0;
           break;
      case DIKS_CURSOR_DOWN:
-          U.set_sel = 1;
+          if (U.set_sel < SET_ROWS - 1) U.set_sel++;
           U.confirm_until = 0;
           break;
      case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT:
           if (repeat) return 1;
-          if (U.set_sel == 1) {                          /* DeArrow on/off */
+          if (U.set_sel == 2) {                          /* DeArrow on/off */
                struct job j = { .kind = JB_SETTINGS, .flag = !U.dearrow };
                post(j);
+               break;
+          }
+          if (U.set_sel == 1) {                          /* a pairing code for a phone */
+               if (U.rcode[0]) { U.rcode[0] = 0; break; }
+               struct job j = { .kind = JB_RSTART };
+               post_browse(j, "Asking YouTube for a TV code\xe2\x80\xa6");
                break;
           }
           if (U.code[0]) {                               /* Cancel */
@@ -1282,7 +1434,6 @@ static int account_key(int k, int repeat, double now)
      U.dirty = 1;
      return 1;
 }
-
 static int card_key(int k, int repeat, double now)
 {
      if (U.scr == Y_HOME) {
@@ -1584,73 +1735,83 @@ static void draw_search(struct canvas *c)
      }
 }
 
-static void draw_account(struct canvas *c, double now)
+/* one Settings row: a title, up to two lines of text, a button on the right */
+static void set_row(struct canvas *c, int y, int row, const char *title, const char *sub, const char *btn)
 {
-     int x = C_X0, y = C_TOP + 40, W = U.h.W;
-     const char *btn;
-     if (U.code[0]) {
-          if (!c) {
-               text(U.h.f_item, x, y, 56, K_TEXT2, "On your phone or computer, go to", -1);
-               text(U.h.f_head, x, y + 64, 70, K_TEXT,
-                    U.code_url[0] ? U.code_url + (strncmp(U.code_url, "https://", 8) ? 0 : 8) : "youtube.com/activate", -1);
-               text(U.h.f_item, x, y + 150, 56, K_TEXT2, "and enter this code:", -1);
-               text(U.h.f_title, x + 40, y + 230, 150, K_TEXT, U.code, -1);
-               text(U.h.f_small, x, y + 410, 40, K_TEXT3, "Waiting for you to approve it\xe2\x80\xa6", -1);
-          } else {
-               gfx_rrect(c, x, y + 222, 640, 166, 28, K_CARD);
-               gfx_rrect_outline(c, x, y + 222, 640, 166, 28, 1, K_PANEL_EDGE);
+     int W = U.h.W, x = C_X0;
+     int bw = (int)strlen(btn) * 18;
+     if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, btn, -1, &bw);
+     bw += 72;
+     int bx = W - C_X0 - bw, foc = !U.tab_focus && U.set_sel == row;
+     if (c) {
+          gfx_rrect(c, x - 24, y - 16, W - 2 * C_X0 + 48, 1, 0, K_PANEL_EDGE);
+          if (foc) gfx_rrect(c, bx, y + 10, bw, 72, 36, 0xffffffff);
+          else {
+               gfx_rrect(c, bx, y + 10, bw, 72, 36, 0x40ffffff);
+               gfx_rrect_outline(c, bx, y + 10, bw, 72, 36, 1, 0x40ffffff);
           }
-          btn = "Cancel";
-          y += 430;
-     } else if (U.acct.signed_in) {
-          if (!c) {
-               char t[160];
-               snprintf(t, sizeof t, "Signed in%s%s", U.acct.name[0] ? " as " : "", U.acct.name);
-               text(U.h.f_head, x, y, 70, K_TEXT, t, -1);
-               wrap(U.h.f_item, "Home shows your subscriptions and YouTube's recommendations. Videos "
-                    "played here are not added to your YouTube history.", x, y + 90, 50, W - 2 * C_X0, 3, K_TEXT2);
-          }
-          btn = U.confirm_until > now ? "Press OK again to sign out" : "Sign out";
-          y += 260;
      } else {
-          if (!c) {
-               text(U.h.f_head, x, y, 70, K_TEXT, U.acct_known ? "Not signed in" : "Checking\xe2\x80\xa6", -1);
-               wrap(U.h.f_item, "Sign in with your YouTube account to see your subscriptions and "
-                    "recommendations on Home. You approve it on your phone; no password is typed here.",
-                    x, y + 90, 50, W - 2 * C_X0, 3, K_TEXT2);
-          }
-          btn = "Sign in";
-          y += 260;
-     }
-     for (int b = 0; b < 2; b++) {
-          const char *t = btn;
-          int by = y;
-          if (b == 1) {                                  /* DeArrow, at the bottom */
-               by = 1080 - 230;
-               t = U.dearrow ? "DeArrow: On" : "DeArrow: Off";
-               if (!c) {
-                    text(U.h.f_bold, x, by - 150, 50, K_TEXT, "DeArrow", -1);
-                    wrap(U.h.f_small, "Community-submitted titles and thumbnails in place of clickbait "
-                         "(dearrow.ajay.app). Only a short hash prefix of each video id is sent.",
-                         x, by - 96, 40, W - 2 * C_X0, 2, K_TEXT2);
-               }
-          }
-          int bw = (int)strlen(t) * 18;
-          if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, t, -1, &bw);
-          bw += 72;
-          int foc = !U.tab_focus && U.set_sel == b;
-          if (c) {
-               if (foc) gfx_rrect(c, x, by, bw, 72, 36, 0xffffffff);
-               else {
-                    gfx_rrect(c, x, by, bw, 72, 36, 0x40ffffff);
-                    gfx_rrect_outline(c, x, by, bw, 72, 36, 1, 0x40ffffff);
-               }
-          } else {
-               text(U.h.f_bold, x + bw / 2, by, 72, foc ? 0xff0b0e16 : K_TEXT, t, 0);
-          }
+          text(U.h.f_bold, x, y, 50, K_TEXT, title, -1);
+          wrap(U.h.f_small, sub, x, y + 52, 40, bx - x - 40, 2, K_TEXT2);
+          text(U.h.f_bold, bx + bw / 2, y + 10, 72, foc ? 0xff0b0e16 : K_TEXT, btn, 0);
      }
 }
 
+/* a big code in a box, with where to enter it */
+static void code_box(struct canvas *c, int y, const char *where, const char *code)
+{
+     int x = C_X0;
+     if (c) {
+          gfx_rrect(c, x, y + 48, 720, 150, 28, K_CARD);
+          gfx_rrect_outline(c, x, y + 48, 720, 150, 28, 1, K_PANEL_EDGE);
+     } else {
+          text(U.h.f_small, x, y, 40, K_TEXT2, where, -1);
+          text(U.h.f_title, x + 36, y + 48, 150, K_TEXT, code, -1);
+     }
+}
+
+static void draw_account(struct canvas *c, double now)
+{
+     char sub[240], name[160];
+     /* the account */
+     int y = C_TOP + 20;
+     if (U.code[0]) {
+          set_row(c, y, 0, "YouTube account", "Waiting for you to approve the sign-in\xe2\x80\xa6", "Cancel");
+          char where[200];
+          snprintf(where, sizeof where, "On your phone or computer, go to %s and enter:",
+                   U.code_url[0] ? U.code_url + (strncmp(U.code_url, "https://", 8) ? 0 : 8) : "google.com/device");
+          code_box(c, y + 150, where, U.code);
+          y += 360;
+     } else if (U.acct.signed_in) {
+          snprintf(name, sizeof name, "Signed in%s%s", U.acct.name[0] ? " as " : "", U.acct.name);
+          set_row(c, y, 0, name, "Home shows your subscriptions, Watch later, likes and recommendations. "
+                  "Videos played here are not added to your YouTube history.",
+                  U.confirm_until > now ? "Press OK again to sign out" : "Sign out");
+          y += 190;
+     } else {
+          set_row(c, y, 0, U.acct_known ? "Not signed in" : "Checking\xe2\x80\xa6",
+                  "Sign in to see your subscriptions and recommendations. You approve it on your phone; "
+                  "no password is typed here.", "Sign in");
+          y += 190;
+     }
+     /* phone casting */
+     if (U.remote_enabled && U.rconn[0]) snprintf(sub, sizeof sub, "Connected: %s", U.rconn);
+     else if (U.remote_enabled) snprintf(sub, sizeof sub, "On. In the YouTube app on your phone: cast, or "
+                                          "Settings \xe2\x80\xba Watch on TV \xe2\x80\xba Link with TV code.");
+     else snprintf(sub, sizeof sub, "Play from the YouTube app on your phone: link it once with a TV code.");
+     set_row(c, y, 1, "Phone casting", sub, U.rcode[0] ? "Done" : "Link a phone");
+     if (U.rcode[0]) {
+          code_box(c, y + 150, "In the YouTube app: Settings \xe2\x80\xba Watch on TV \xe2\x80\xba "
+                   "Link with TV code, then enter:", U.rcode);
+          y += 360;
+     } else {
+          y += 190;
+     }
+     /* DeArrow */
+     set_row(c, y, 2, "DeArrow", "Community-submitted titles and thumbnails in place of clickbait "
+             "(dearrow.ajay.app). Only a short hash prefix of each video id is sent.",
+             U.dearrow ? "On" : "Off");
+}
 static void draw_toast(struct canvas *c, double now)
 {
      if (U.toast_until <= now) return;

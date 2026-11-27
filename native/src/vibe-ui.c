@@ -2182,6 +2182,7 @@ int main(int argc, char **argv)
      load_hidden(a);                    /* before the first input list */
      a->jf_avail = jfui_available();
      a->yt_avail = ytui_available();
+     if (a->yt_avail) ytui_start();     /* a linked phone can cast at any time */
      poll_inputs(a);
      a->bar_expected = read_bar_expected();
      printf("soundbar expected: %d (remembered)\n", a->bar_expected);
@@ -2313,6 +2314,12 @@ int main(int argc, char **argv)
                a->dirty = 1;
           if (ytui_tick(now) && a->screen == S_YOUTUBE)
                a->dirty = 1;
+          /* a phone cast while the panel was closed: open it (never over a
+           * Jellyfin film) */
+          if (ytui_wants_open() && a->screen != S_YOUTUBE && !jfui_playing()) {
+               if (a->screen == S_JELLYFIN) jfui_close(now);
+               open_youtube(a, now);
+          }
           /* no-signal standby: 4 min without signal on the current input,
            * then the last minute; a signal (or another input) ends it */
           /* (a Jellyfin film plays over an input with no signal) */

@@ -103,6 +103,20 @@ int  yt_signout(void);
  * set < 0 only reads. *dearrow gets the value; thumbnails ask for DeArrow's
  * when it is on (yt_thumb_url). */
 int  yt_settings(int set_dearrow, int *dearrow);
+
+/* casting from a phone ("Link with TV code"; the helper is the lounge screen) */
+struct yt_cmd {
+     char cmd[16];             /* none, play, pause, resume, seek, stop */
+     char id[16];              /* play: the video */
+     double pos;               /* play, seek: seconds */
+};
+int  yt_remote_start(char *code, int n);     /* a pairing code to show */
+int  yt_remote_status(int *enabled, char *connected, int n);
+int  yt_remote_stop(void);
+/* waits up to timeout_s for the phone's next command (cmd "none" if none) */
+int  yt_remote_next(int timeout_s, struct yt_cmd *out);
+/* what the TV is doing, for the phone: state playing|paused|loading|stopped */
+int  yt_remote_state(const char *id, double pos, double dur, const char *state);
 int  yt_follow(const char *channel_id, int on);
 
 /* image URLs on the helper (out >= 256 bytes); size 'm' 320x180, 'l' 1280x720 */

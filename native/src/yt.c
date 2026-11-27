@@ -313,6 +313,67 @@ int yt_follow(const char *cid, int on)
      return j ? 0 : -1;
 }
 
+int yt_remote_start(char *code, int n)
+{
+     code[0] = 0;
+     cJSON *j = call("POST", "/api/remote/start", 30000);
+     if (!j) return -1;
+     snprintf(code, (size_t)n, "%s", str(j, "code"));
+     cJSON_Delete(j);
+     if (!code[0]) { set_err("no pairing code"); return -1; }
+     return 0;
+}
+
+int yt_remote_status(int *enabled, char *connected, int n)
+{
+     *enabled = 0;
+     connected[0] = 0;
+     cJSON *j = call("GET", "/api/remote/status", 15000);
+     if (!j) return -1;
+     *enabled = flag(j, "enabled");
+     const cJSON *c;
+     cJSON_ArrayForEach(c, cJSON_GetObjectItemCaseSensitive(j, "connected")) {
+          if (!cJSON_IsString(c)) continue;
+          size_t l = strlen(connected);
+          snprintf(connected + l, (size_t)n - l, "%s%s", l ? ", " : "", c->valuestring);
+     }
+     cJSON_Delete(j);
+     return 0;
+}
+
+int yt_remote_stop(void)
+{
+     cJSON *j = call("POST", "/api/remote/stop", 15000);
+     int ok = j != NULL;
+     cJSON_Delete(j);
+     return ok ? 0 : -1;
+}
+
+int yt_remote_next(int timeout_s, struct yt_cmd *out)
+{
+     memset(out, 0, sizeof *out);
+     snprintf(out->cmd, sizeof out->cmd, "none");
+     char path[64];
+     snprintf(path, sizeof path, "/api/remote/next?timeout=%d", timeout_s);
+     cJSON *j = call("GET", path, (long)(timeout_s + 15) * 1000);
+     if (!j) return -1;
+     snprintf(out->cmd, sizeof out->cmd, "%s", str(j, "cmd")[0] ? str(j, "cmd") : "none");
+     snprintf(out->id, sizeof out->id, "%s", str(j, "id"));
+     out->pos = num(j, "pos");
+     cJSON_Delete(j);
+     return 0;
+}
+
+int yt_remote_state(const char *id, double pos, double dur, const char *state)
+{
+     char path[160];
+     snprintf(path, sizeof path, "/api/remote/state?id=%s&pos=%.1f&dur=%.1f&state=%s", id, pos, dur, state);
+     cJSON *j = call("POST", path, 10000);
+     int ok = j != NULL;
+     cJSON_Delete(j);
+     return ok ? 0 : -1;
+}
+
 static volatile int dearrow_on;    /* written by the worker, read by the UI: an int */
 
 int yt_settings(int set, int *dearrow)
