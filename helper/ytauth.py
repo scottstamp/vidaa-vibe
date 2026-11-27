@@ -139,12 +139,16 @@ class History:
         self.sent_at = 0.0
         self.final = False
         self.busy = False
+        self.pending = None       # a forced report that came while one was being sent
 
     def report(self, vid, pos, tok, force=False):
         """called with every position the TV posts (every 10 s); sends at
-        most every REPORT_EVERY_S, in a thread"""
+        most every REPORT_EVERY_S, in a thread. force (the TV stopped): now,
+        or right after the one being sent"""
         with self.lock:
             if self.busy:
+                if force:
+                    self.pending = (vid, pos, tok)
                 return
             now = time.time()
             if vid == self.vid and not force and now - self.sent_at < REPORT_EVERY_S:
@@ -173,7 +177,11 @@ class History:
             self.sent_at = time.time()
         finally:
             with self.lock:
-                self.busy = False
+                nxt, self.pending = self.pending, None
+                if not nxt:
+                    self.busy = False
+            if nxt:
+                self._send(*nxt)
 
     def _get(self, path, q, tok):
         q = dict(q, ns="yt", ver="2", docid=self.vid, cpn=self.cpn,

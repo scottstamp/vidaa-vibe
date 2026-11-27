@@ -252,10 +252,10 @@ int yt_play(const char *id, int mh, struct yt_play *out)
      return 0;
 }
 
-int yt_progress(const char *id, double pos, double dur)
+int yt_progress(const char *id, double pos, double dur, int stop)
 {
-     char path[96];
-     snprintf(path, sizeof path, "/api/progress?id=%s&pos=%.1f&dur=%.1f", id, pos, dur);
+     char path[112];
+     snprintf(path, sizeof path, "/api/progress?id=%s&pos=%.1f&dur=%.1f%s", id, pos, dur, stop ? "&stop=1" : "");
      cJSON *j = call("POST", path, 10000);
      cJSON_Delete(j);
      return j ? 0 : -1;

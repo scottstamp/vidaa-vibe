@@ -405,3 +405,22 @@ Followed SmartTube (MediaServiceCore, cloned 2026-11-26 at 3e82ef2).
   - Tested: `FEpojejgNrY` from the History tab started at about 502 s of
     2395 (YouTube's 21%).
   - Precision is 1% of the length, about 24 s here.
+- **Precise resume, YouTube first (2026-11-26):**
+  - The TV tiles carry the exact resume second,
+    `onSelectCommand…watchEndpoint.startTimeSeconds`. This is SmartTube's
+    `getStartTimeSeconds`. The helper uses it when it agrees with the
+    watched-percent bar (within 1% + 5 s), else percent × length.
+  - Seen: `a1-eZuCffLY` with start 1 s at 10%.
+  - `FEpojejgNrY` started at 622.7 s, YouTube's value.
+  - **YouTube's marker barely follows our watch reports.** We stopped at
+    668 s and sent a stop report (`stop=1`, sent at once). YouTube still
+    showed 26% (623 s) 4 minutes later, and the tile's `startTimeSeconds`
+    was gone. Other videos we reported did move (`2YnbwaDjzoQ` 426 s). Why
+    some do and some don't is unknown.
+  - So the rule is: YouTube's position wins when it **changed** after this
+    TV's last save (watched elsewhere). Otherwise the TV's newer save wins.
+  - The helper keeps the last-seen YouTube values in its state (`ytpos`,
+    saved every 30 s), so a restart does not make old ones look new. A
+    first sight next to a local save counts as old.
+  - Not yet seen on the TV: a video watched on a phone after the TV,
+    resumed at the phone's point.

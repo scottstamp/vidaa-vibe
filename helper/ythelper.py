@@ -23,7 +23,8 @@ API (GET unless noted; JSON):
                                   history on) or the local one; most recent first
   /api/settings                   {dearrow, autoplay, history}; POST ?dearrow= / ?autoplay= / ?history=0|1
   /api/following                  channels
-  POST /api/progress?id=&pos=&dur=   seconds; signed in, also the account's watch history
+  POST /api/progress?id=&pos=&dur=[&stop=1]   seconds; signed in, also the account's watch history
+                                  (at most once a minute; stop=1, the TV stopped: at once)
   POST /api/follow?id=UC...&on=0|1
   /hls/<id>.m3u8?maxh=1080        the trimmed HLS master (signed-in DASH files: one built here)
   /hlsf/<id>/<format>.m3u8        a DASH file as an HLS media playlist (byte ranges)
@@ -172,10 +173,52 @@ def item_of(e):
           "channel_id": e.get("channel_id") or "",
           "duration": int(e.get("duration") or 0), "views": int(e.get("view_count") or 0),
           "published": pub, "live": e.get("live_status") == "is_live" or bool(e.get("is_live"))}
-    p = STATE.progress(vid)
-    if p:
-        it["position"] = p.get("pos", 0)
+    pos = best_pos(vid)
+    if pos is not None:
+        it["position"] = pos
     return it
+
+# Where to resume. YouTube's position for the account comes from its lists
+# (the tile's exact startTimeSeconds when it agrees with the watched-percent
+# bar, else percent x length). YouTube's is preferred when it changed after
+# this TV last saved one (watched elsewhere). Otherwise this TV's save wins:
+# YouTube's marker barely follows the watch reports we send (measured
+# 2026-11-26: stopped at 668 s, YouTube kept 26% = 623 s), so an unchanged
+# YouTube value is just old. Last-seen values are kept in the state file, so
+# a restart does not make old ones look new.
+YT_POS_DIRTY = [False]
+
+def yt_pos_seen(vid, pos):
+    now = time.time()
+    with STATE.lock:
+        d = STATE.d.setdefault("ytpos", {})
+        old = d.get(vid)
+        if old and abs(old[0] - pos) < 1:
+            return
+        # first sight with a local save: we cannot tell when YouTube's changed
+        changed = now if old or vid not in STATE.d["progress"] else 0
+        d[vid] = [pos, changed]
+        if len(d) > 3000:
+            for k in sorted(d, key=lambda k: d[k][1])[:800]:
+                del d[k]
+        YT_POS_DIRTY[0] = True
+
+def yt_pos_saver():
+    while True:
+        time.sleep(30)
+        if YT_POS_DIRTY[0]:
+            YT_POS_DIRTY[0] = False
+            with STATE.lock:
+                STATE.save()
+
+def best_pos(vid):
+    """seconds to resume at, or None (never watched, as far as we know)"""
+    with STATE.lock:
+        yp = (STATE.d.get("ytpos") or {}).get(vid)
+    lp = STATE.progress(vid)
+    if yp and (not lp or yp[1] >= lp.get("t", 0)):
+        return yp[0]
+    return lp.get("pos", 0) if lp else None
 
 def with_positions(items):
     """cached lists carry the positions of when they were made: current ones;
@@ -183,9 +226,9 @@ def with_positions(items):
     out = []
     for it in items:
         it = dict(it)
-        p = STATE.progress(it["id"])
-        if p:
-            it["position"] = p.get("pos", 0)
+        pos = best_pos(it["id"])
+        if pos is not None:
+            it["position"] = pos
         out.append(it)
     if setting("dearrow"):
         brand_many([it["id"] for it in out])
@@ -741,7 +784,7 @@ def tile_item(t):
         if s:
             lines.append(s)
     overlays = ((t.get("header") or {}).get("tileHeaderRenderer") or {}).get("thumbnailOverlays") or []
-    badge, style, pct = "", "", 0
+    badge, style, pct = "", "", None
     for ov in overlays:
         ts = ov.get("thumbnailOverlayTimeStatusRenderer")
         if ts:
@@ -755,11 +798,15 @@ def tile_item(t):
     it = {"id": vid, "title": text_of(meta.get("title")), "channel": lines[0] if lines else "",
           "channel_id": "", "duration": dur, "views": 0, "published": "",
           "info": " · ".join(lines[1:])[:90], "live": style == "LIVE"}
-    p = STATE.progress(vid)
-    if p:
-        it["position"] = p.get("pos", 0)
-    elif pct and dur:
-        it["position"] = dur * pct / 100.0
+    start = (we or {}).get("startTimeSeconds")
+    if pct is not None and dur:
+        est = dur * pct / 100.0                       # 100: watched (the TV starts it over)
+        # the exact second, when it agrees with the bar (seen: start 1 s at 10%)
+        exact = isinstance(start, (int, float)) and pct < 100 and abs(start - est) <= dur * 0.01 + 5
+        yt_pos_seen(vid, float(start) if exact else est)
+    pos = best_pos(vid)
+    if pos is not None:
+        it["position"] = pos
     return it
 
 def tiles_in(x, seen, out):
@@ -1095,7 +1142,7 @@ class H(BaseHTTPRequestHandler):
                 if pos > 0 and not setting("history_off") and auth_state().get("refresh_token"):
                     tok = access_token()
                     if tok:
-                        HISTORY.report(vid, pos, tok)
+                        HISTORY.report(vid, pos, tok, force=q.get("stop") == "1")
                         LIST_CACHE.d.pop("FEhistory", None)
                 return self.send(200, {"ok": True})
             if p == "/api/follow" and self.command == "POST":
@@ -1155,6 +1202,7 @@ def main():
     ARGS = ap.parse_args()
     STATE = State(ARGS.state)
     REMOTE = ytlounge.Lounge(remote_get, remote_set, name=REMOTE_NAME)
+    threading.Thread(target=yt_pos_saver, daemon=True).start()
     if remote_get("enabled"):
         REMOTE.start()
     srv = ThreadingHTTPServer((ARGS.host, ARGS.port), H)

@@ -150,7 +150,7 @@ static void *worker(void *arg)
                if (r->rc == 0) r->rc = yt_play(j.id, yt_maxh(), &r->play);
                break;
           case JB_REPLAY:   r->rc = yt_play(j.id, j.n, &r->play); break;    /* another quality */
-          case JB_PROGRESS: r->rc = yt_progress(j.id, j.pos, j.dur); break;
+          case JB_PROGRESS: r->rc = yt_progress(j.id, j.pos, j.dur, j.flag); break;
           case JB_FOLLOW:   r->rc = yt_follow(j.id, j.flag); break;
           case JB_ACCOUNT:                              /* and the settings */
                r->rc = yt_account(&r->acct);
@@ -671,10 +671,11 @@ static double cur_pos(double now)
      return U.pos_ms + (U.pstate == 1 && U.pos_at > 0 ? (now - U.pos_at) * 1000.0 * U.speed / 100.0 : 0);
 }
 
-static void report(double now)
+/* stop: playback is stopping (not the periodic report) */
+static void report(double now, int stop)
 {
      if (U.live || !U.playing.id[0]) return;
-     struct job j = { .kind = JB_PROGRESS, .pos = U.pos_ms / 1000.0, .dur = U.dur_ms / 1000.0 };
+     struct job j = { .kind = JB_PROGRESS, .pos = U.pos_ms / 1000.0, .dur = U.dur_ms / 1000.0, .flag = stop };
      snprintf(j.id, sizeof j.id, "%s", U.playing.id);
      post(j);
      U.next_report = now + 10;
@@ -713,7 +714,7 @@ static void stop_playback(double now, int ended)
      U.busy = 0;
      if (ended && U.dur_ms > 0) U.pos_ms = U.dur_ms;
      if (U.pstate) {
-          report(now);
+          report(now, 1);
           update_cards_position(ended ? 0 : U.pos_ms / 1000.0);
      }
      /* the end, autoplay on, suggestions known: count down to the next one,
@@ -751,7 +752,7 @@ static void upnext_cancel(void)
 static void play_item(const struct yt_item *it)
 {
      if (U.pid) {
-          if (U.pstate) report(0);
+          if (U.pstate) report(0, 1);
           player_send("stop keep");
           player_reap();
      }
@@ -1194,7 +1195,7 @@ int ytui_tick(double now)
                     if (U.seek_target_ms / 1000.0 < U.det.segs[i].start) U.seg_done[i] = 0;
           }
           sponsor_tick(now);
-          if (U.pstate == 1 && now >= U.next_report) { report(now); rstate("playing"); }
+          if (U.pstate == 1 && now >= U.next_report) { report(now, 0); rstate("playing"); }
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms + 3000) { stop_playback(now, 1); return U.on; }
           if (U.pstate == 1 && U.dur_ms > 0 && U.pos_ms > U.dur_ms - 15000 &&
               U.pos_moved > 0 && now - U.pos_moved > 6) { stop_playback(now, 1); return U.on; }
@@ -1328,7 +1329,7 @@ static void osd_action(double now)
           if (yt_set_maxh(h) != 0) fprintf(stderr, "youtube: could not save the quality\n");
           if (U.pstate == 0) { build_buttons(); show_osd(now); break; }
           U.start_ms = cur_pos(now);
-          report(now);
+          report(now, 1);
           player_send("stop keep");
           player_reap();
           U.pstate = 0;

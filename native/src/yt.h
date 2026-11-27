@@ -99,7 +99,8 @@ int  yt_history(int n, struct yt_list *out);
 int  yt_channel(const char *id, int n, struct yt_channel *out);
 int  yt_video(const char *id, struct yt_video *out);
 int  yt_play(const char *id, int maxh, struct yt_play *out);
-int  yt_progress(const char *id, double pos, double dur);
+/* stop: playback stopped here (the helper reports it to YouTube at once) */
+int  yt_progress(const char *id, double pos, double dur, int stop);
 
 /* the YouTube account (sign-in by device code, in the helper) */
 struct yt_account {
