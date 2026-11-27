@@ -169,6 +169,7 @@ tracked file if it quotes vendor code or carries the unit's identifiers.
 | `native/src/jf*.c`, `http.c`, `vibe-play.c`, `vibe-jf.c` | Jellyfin: API (`jf.c`), panel (`jfui.c`), images (`jfimg.c`), subtitles (`jfsub.c`), the player child, a command-line client |
 | `native/src/ytui.c`, `yt.c` | YouTube: panel and the helper's client (`/var/local/vibe/state/youtube`: `helper=`, `maxh=`) |
 | `helper/ythelper.py` | the YouTube helper (yt-dlp, SponsorBlock, thumbnails, follows/progress); runs on a home machine |
+| `helper/ytauth.py`, `helper/ytpot.mjs` | signed-in playback and watch history (SmartTube's TV_DOWNGRADED client, patched into yt-dlp); the TV PoToken minter (Node + jsdom, unused for now) |
 | `native/splash/`, `native/tools/make-splash.py` | our boot animation (740x300 PNG frames + `animation.cfg`), deployed to `/var/local/vibe/splash` |
 | `native/src/vibe-sem.c` | posts a named semaphore (GUICLOSE ends the stock boot animation; not needed with our frames) |
 | `native/fonts/` | Noto Sans (OFL), deployed to `/var/local/vibe/fonts`; `*.ttf` is binary in `.gitattributes` |
