@@ -1,8 +1,8 @@
 #!/bin/sh
 # Install or update the YouTube helper as a systemd service on a Debian/Ubuntu
 # host (written for "fin", the Jellyfin box). Run as root, with ythelper.py
-# copied to /tmp/ythelper.py first:
-#   scp helper/ythelper.py root@HOST:/tmp/ && ssh root@HOST 'sh -s' < helper/install-fin.sh
+# ytlounge.py and ytextra.py copied to /tmp first:
+#   scp helper/ythelper.py helper/ytlounge.py helper/ytextra.py root@HOST:/tmp/ && ssh root@HOST 'sh -s' < helper/install-fin.sh
 # Needs python3-venv and a JS runtime (node) for yt-dlp's YouTube challenge.
 #
 # What it makes:
@@ -16,13 +16,15 @@
 set -eu
 APP=/opt/vibe-ythelper
 DATA=/var/lib/vibe-ythelper
-[ -f /tmp/ythelper.py ] || { echo "copy ythelper.py to /tmp first" >&2; exit 1; }
+[ -f /tmp/ythelper.py ] && [ -f /tmp/ytlounge.py ] && [ -f /tmp/ytextra.py ] || { echo "copy ythelper.py, ytlounge.py and ytextra.py to /tmp first" >&2; exit 1; }
 command -v node >/dev/null || { echo "node missing" >&2; exit 1; }
 
 id vibeyt >/dev/null 2>&1 || useradd --system --home-dir $DATA --shell /usr/sbin/nologin vibeyt
 mkdir -p $APP $DATA
+install -m 0644 /tmp/ytlounge.py $APP/ytlounge.py.new && mv $APP/ytlounge.py.new $APP/ytlounge.py
+install -m 0644 /tmp/ytextra.py $APP/ytextra.py.new && mv $APP/ytextra.py.new $APP/ytextra.py
 install -m 0644 /tmp/ythelper.py $APP/ythelper.py.new && mv $APP/ythelper.py.new $APP/ythelper.py
-rm -f /tmp/ythelper.py
+rm -f /tmp/ythelper.py /tmp/ytlounge.py /tmp/ytextra.py
 [ -x $APP/venv/bin/python ] || python3 -m venv $APP/venv
 $APP/venv/bin/pip install -q -U pip "yt-dlp[default]"
 chown -R vibeyt:vibeyt $DATA

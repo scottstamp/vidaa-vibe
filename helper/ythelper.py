@@ -26,11 +26,21 @@ API (GET unless noted; JSON):
   /hls/<id>.m3u8?maxh=1080        the trimmed HLS master
   /thumb/<id>.jpg?s=m|l           video thumbnail (320x180 | 1280x720)
   /avatar/<channel id>.jpg        channel avatar (if known)
+ casting from the phone's YouTube app ("Link with TV code"; ytlounge.py):
+  POST /api/remote/start          {code: "1234 5678 9012", name}; on from now, also after a restart
+  /api/remote/status              {enabled, running, connected: [phone names]}
+  POST /api/remote/stop           {ok}; off
+  /api/remote/next?timeout=25     long poll: {cmd: none | play (id, pos) | pause | resume | seek (pos) | stop}
+  POST /api/remote/state?id=&pos=&dur=&state=playing|paused|loading|stopped   what the TV plays
 """
-import argparse, hashlib, json, os, re, sys, threading, time, urllib.parse, urllib.request
+import argparse, hashlib, json, os, re, signal, sys, threading, time, urllib.parse, urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import yt_dlp
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # python -I leaves it out
+import ytlounge
+import ytextra
 
 ARGS = None
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
@@ -732,6 +742,38 @@ def signout():
     LIST_CACHE.d.clear()
     return {"ok": True}
 
+# ------------------------------------------------------------------ casting
+#
+# The phone's YouTube app casts to the TV through ytlounge.py (the screen side
+# of YouTube's lounge). The TV long-polls /api/remote/next for what to do and
+# posts what it plays to /api/remote/state. Volume commands are not passed on.
+
+REMOTE = None           # ytlounge.Lounge
+REMOTE_NAME = "Vibe TV"
+
+def remote_get(key):
+    with STATE.lock:
+        return (STATE.d.get("remote") or {}).get(key)
+
+def remote_set(key, value):
+    with STATE.lock:
+        STATE.d.setdefault("remote", {})[key] = value
+        STATE.save()
+
+def remote_start():
+    REMOTE.start()
+    remote_set("enabled", True)
+    return {"code": REMOTE.pairing_code(), "name": REMOTE_NAME}
+
+def remote_status():
+    return {"enabled": bool(remote_get("enabled")), "running": REMOTE.running(),
+            "connected": REMOTE.connected()}
+
+def remote_stop():
+    remote_set("enabled", False)
+    REMOTE.stop()
+    return {"ok": True}
+
 # ------------------------------------------------------------------ images
 
 def fetch_bytes(url):
@@ -785,7 +827,7 @@ def avatar(cid):
 
 def home():
     shelves = []
-    cont = STATE.recent(20, unfinished_only=True)
+    cont = with_positions(STATE.recent(20, unfinished_only=True))    # DeArrow titles too
     if cont:
         shelves.append({"title": "Continue watching", "items": cont})
     if account()["signed_in"]:
@@ -856,8 +898,14 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/settings":
                 if self.command == "POST" and "dearrow" in q:
                     set_setting("dearrow", q["dearrow"] == "1")
+                if self.command == "POST" and "autoplay" in q:
+                    set_setting("autoplay_off", q["autoplay"] != "1")      # on unless turned off
                     LIST_CACHE.d.clear()
-                return self.send(200, {"dearrow": setting("dearrow")})
+                return self.send(200, {"dearrow": setting("dearrow"), "autoplay": not setting("autoplay_off")})
+            if p == "/api/related":
+                return self.send(200, {"items": with_positions(ytextra.related(vid))[:30]})
+            if p == "/api/comments":
+                return self.send(200, {"items": ytextra.comments(vid, min(int(q.get("n", 40)), 60))})
             if p == "/api/account":
                 return self.send(200, account())
             if p == "/api/signin/start" and self.command == "POST":
@@ -866,6 +914,19 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, signin_poll())
             if p == "/api/signout" and self.command == "POST":
                 return self.send(200, signout())
+            if p == "/api/remote/start" and self.command == "POST":
+                return self.send(200, remote_start())
+            if p == "/api/remote/status":
+                return self.send(200, remote_status())
+            if p == "/api/remote/stop" and self.command == "POST":
+                return self.send(200, remote_stop())
+            if p == "/api/remote/next":
+                return self.send(200, REMOTE.next_command(float(q.get("timeout", 25))))
+            if p == "/api/remote/state" and self.command == "POST":
+                if q.get("state") not in ytlounge.TV_STATES:
+                    return self.send(400, {"error": "state: playing, paused, loading or stopped"})
+                REMOTE.report(vid, float(q.get("pos") or 0), float(q.get("dur") or 0), q["state"])
+                return self.send(200, {"ok": True})
             if p == "/api/following":
                 return self.send(200, {"items": STATE.follows()})
             if p == "/api/progress" and self.command == "POST":
@@ -920,7 +981,7 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
-    global ARGS, STATE
+    global ARGS, STATE, REMOTE
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8770)
@@ -928,11 +989,18 @@ def main():
     ap.add_argument("--js-runtime", default="node")
     ARGS = ap.parse_args()
     STATE = State(ARGS.state)
+    REMOTE = ytlounge.Lounge(remote_get, remote_set, name=REMOTE_NAME)
+    if remote_get("enabled"):
+        REMOTE.start()
     srv = ThreadingHTTPServer((ARGS.host, ARGS.port), H)
     srv.daemon_threads = True
     print("ythelper on %s:%d, state %s, yt-dlp %s" % (ARGS.host, ARGS.port, ARGS.state,
                                                       yt_dlp.version.__version__), flush=True)
-    srv.serve_forever()
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))      # systemd's stop: leave the lounge first
+    try:
+        srv.serve_forever()
+    finally:
+        REMOTE.stop()
 
 
 if __name__ == "__main__":

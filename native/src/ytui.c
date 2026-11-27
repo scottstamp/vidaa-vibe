@@ -562,7 +562,7 @@ static void build_buttons(void)
           add_btn("Channel", A_CHANNEL);
           if (U.have_det) add_btn(U.det.followed ? "Unfollow" : "Follow", U.det.followed ? A_UNFOLLOW : A_FOLLOW);
      }
-     if (!U.live) add_btn("From the start", A_RESTART);
+     if (!U.live) add_btn("Restart", A_RESTART);
      if (!U.live) {
           char t[32];
           if (U.speed % 100 == 0) snprintf(t, sizeof t, "Speed %d\xc3\x97", U.speed / 100);
@@ -572,11 +572,11 @@ static void build_buttons(void)
      }
      {
           char t[32];
-          snprintf(t, sizeof t, "Up to %dp", yt_maxh());
+          snprintf(t, sizeof t, "%dp", yt_maxh());
           add_btn(t, A_QUALITY);
      }
-     if (U.have_det && U.det.description) add_btn(U.desc_on ? "Hide description" : "Description", A_DESC);
-     if (!U.live) add_btn(U.comm_on ? "Hide comments" : "Comments", A_COMMENTS);
+     if (U.have_det && U.det.description) add_btn("Info", A_DESC);          /* toggles */
+     if (!U.live) add_btn("Comments", A_COMMENTS);
      if (U.bsel >= U.nbtn) U.bsel = U.nbtn ? U.nbtn - 1 : 0;
 }
 
@@ -715,8 +715,9 @@ static void stop_playback(double now, int ended)
      }
      /* the end, autoplay on, suggestions known: count down to the next one,
       * staying on the DMP path ("stop keep") */
-     int next = ended && U.autoplay && U.rel.n > 0 && !strcmp(U.rel_for, U.playing.id);
-     if (!next) rstate("stopped");
+     /* a phone connected: its queue decides what is next ("ended") */
+     int next = ended && U.autoplay && U.rel.n > 0 && !strcmp(U.rel_for, U.playing.id) && !U.rconn[0];
+     if (!next) rstate(ended && U.rconn[0] ? "ended" : "stopped");
      player_send(next ? "stop keep" : "stop");
      player_reap();
      U.home_stale = 1;             /* Continue watching changed */
@@ -2098,7 +2099,7 @@ static void draw_overlay(struct canvas *c, double now)
           if (!U.live && U.dur_ms > 0) text(U.h.f_small, bx + bw, by + 22, 40, K_TEXT2, p2, 1);
      }
      /* the actions, right of the time under the bar */
-     int ay = by + 22, ah = 58, ax = bx + 200;
+     int ay = by + 22, ah = 58, ax = bx + 170;
      for (int i = 0; i < U.nbtn; i++) {
           int aw = (int)strlen(U.btn[i].title) * 16;
           if (U.h.f_small) U.h.f_small->GetStringWidth(U.h.f_small, U.btn[i].title, -1, &aw);

@@ -204,3 +204,101 @@ the script's header.
 - Not done: playback is still resolved signed out (yt-dlp), so members-only
   and age-restricted videos do not play; watching here is not reported to
   YouTube (no history, no "watched" marks there).
+
+## Casting from the phone: the lounge receiver in the helper (2026-11-27)
+
+`helper/ytlounge.py` (standard library only) is the screen side of
+YouTube's lounge ("Link with TV code"), ported from SmartTube's
+`youtubeapi/.../lounge/`. The helper keeps the session; the TV long-polls
+the helper for commands and posts what it plays. **Not yet tried with a
+real phone**; everything below was measured from the PC against YouTube's
+servers, with a stand-in for the phone (`research/yt-lounge/fake_remote.py`:
+`pairing/get_screen` with the code, then a bind as `REMOTE_CONTROL`).
+
+Helper API (TV side in `yt.c`): `POST /api/remote/start` -> `{code, name}`
+(a fresh 12-digit code each call; on from now, also after a restart),
+`GET /api/remote/status` -> `{enabled, running, connected}`,
+`POST /api/remote/stop`, `GET /api/remote/next?timeout=25` -> `{cmd: none |
+play (id, pos) | pause | resume | seek (pos) | stop}`,
+`POST /api/remote/state?id=&pos=&dur=&state=playing|paused|loading|stopped`
+(also `ended`: the next video of the phone's queue is started, if any).
+State: `remote: {enabled, screen_id, device_id}` in the helper's state file.
+Volume commands are dropped in the helper; nothing reaches the TV.
+
+Measured:
+
+- `pairing/generate_screen_id` -> 26 characters of text.
+  `get_lounge_token_batch` -> JSON; the token is 119 characters,
+  `loungeTokenLifespanMs` 14 days, `refreshIntervalMs` 13 days.
+  `get_pairing_code?ctx=pair` -> 12 digits as text/plain. Older codes keep
+  working after a newer one is made, and no restart of the session is
+  needed for a code to work (SmartTube drops its token after each code).
+- Bind (`POST bc/bind`, body `count=0`): one chunk, `<length>\n` then a
+  JSON array of `[index, [command, args]]`: `c` (SID), `S` (gsessionid),
+  `loungeStatus` (`devices` is a JSON string; ours is listed as
+  `LOUNGE_SCREEN`, clientName `tvhtml5`), `getNowPlaying`,
+  `getDiscoveryDeviceId` (indexes 0-4).
+- The long poll (`GET bc/bind?RID=rpc&CI=0&SID&gsessionid&AID`): the server
+  honours `AID`: with `AID=3` it sent array 4 again, with SmartTube's fixed
+  `AID=42` it sent nothing old. A `noop` every 24-29 s. The server ends the
+  poll after about 290 s (clean EOF); opening it again with the same SID and
+  the last index works (10 min: one bind, three polls, no errors).
+  `TYPE=xmlhttp` made no difference.
+- Posting events with a counting `RID` and a per-session `ofs` is accepted
+  (SmartTube sends `RID=1337` always). A post with an unknown SID gets
+  HTTP 400; a new bind then lists the phone again in `loungeStatus`.
+- A phone joining: `loungeStatus`, `remoteConnected` (name, id, type),
+  then `getNowPlaying`, `getSubtitlesTrack`, `getVolume`,
+  `getPartyGamesMode`. Leaving: `remoteDisconnected`, about 10 s after the
+  phone's `TYPE=terminate`.
+- `setPlaylist` arrives with `videoId`, `videoIds`, `currentIndex`,
+  `currentTime`, `listId`, `eventDetails`, `sourceDeviceType`. The stand-in's
+  `setVideo` reached the screen as a `setPlaylist`, its `listId` was
+  replaced by the lounge's own queue id (also added to our `nowPlaying`),
+  its `ctt` and its `updatePlaylist` did not arrive: the server owns the
+  queue. `pause`, `play`, `seekTo {newTime}`, `next`, `previous`,
+  `stopVideo`, `setVolume {volume, delta}` arrive as SmartTube models them.
+- Our `nowPlaying` (state 3 loading / 1 / 2, `currentTime`, `duration`,
+  `currentIndex`, `cpn`), `onStateChange` and `onHasPreviousNextChanged`
+  reach the phone side; an empty `nowPlaying` is sent for "nothing playing".
+- `TYPE=terminate` on stop (not in SmartTube): the phone side gets
+  `loungeScreenDisconnected` within seconds.
+- Ending the long poll from another thread by shutting the socket down
+  wakes the reader at once on Linux (WSL), on Windows only at the next
+  `noop`.
+
+Unknown until a phone is used: what the YouTube app shows for our states
+(the empty `nowPlaying`, `getVolume` left unanswered, autoplay), whether it
+sends `updatePlaylist` with `videoIds` when the queue changes, whether it
+finds the screen again by itself after the helper restarts, `ctt`.
+
+## More SmartTube features (2026-11-27)
+
+- **Dubbed audio:** YouTube auto-dubs many videos; the HLS master lists one
+  `EXT-X-MEDIA` per language per group, all `DEFAULT=NO`, and HMP played the
+  first (Arabic). The helper keeps one rendition: the English original, else
+  English, else the original, else YouTube's default; made `DEFAULT=YES`.
+- **DeArrow** (setting, off by default): `sponsor.ajay.app/api/branding/<sha256[:4]>`
+  (k-anonymous); titles applied to every list and the details, thumbnails
+  from `dearrow-thumb.ajay.app/api/v1/getThumbnail?videoID&time` (the TV
+  asks with `&da=1` so its image cache keeps both kinds apart).
+- **Watch later / Liked videos** (signed in): TV browse `VLWL` / `VLLL`,
+  15 tiles a page plus continuations; two pages added.
+- **Search** loads 30 more near the end of the results (up to 120).
+- **Related and comments** (`helper/ytextra.py`): WEB InnerTube `next`,
+  signed out. Related = `lockupViewModel` (contentId, title, metadataRows
+  [channel] [views, age], `thumbnailBadgeViewModel` duration); comments =
+  the comment section's continuation (`itemSectionRenderer`
+  `comment-item-section`), `commentEntityPayload` mutations, top level only.
+- **Player:** chapter gaps on the bar and the current chapter's name; an
+  "Up next" row (DOWN from the actions); a Comments panel (UP/DOWN scroll);
+  Autoplay (setting, on): at the end an 8 s countdown to the first
+  suggestion, the player kept on DMP between videos ("stop keep"); with a
+  phone connected the phone's queue decides instead (`state=ended`). The
+  SponsorBlock summary line is gone (the bar shows the segments).
+- **Not possible yet:** reporting watches to YouTube and signed-in
+  playback (members-only, age-restricted): the TV client's `player`
+  request answers "The page needs to be reloaded" even with
+  `signatureTimestamp` (needs a BotGuard PoToken, which SmartTube makes in
+  V8), and yt-dlp with our bearer header gets HTTP 400. Probes:
+  `helper/probe_authplay.py`.
