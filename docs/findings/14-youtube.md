@@ -104,3 +104,30 @@ variants, seeking within HLS.
    home feed through InnerTube with the token. Token in vibe-ui's state.
 5. Later: DeArrow titles, casting from a phone (lounge), quality and speed
    controls, live.
+
+## v1 built (2026-11-26, branch `youtube`)
+
+- **Helper** `helper/ythelper.py` (Python, yt-dlp as a library, Node as
+  its JS runtime): `/api/home|search|channel|video|play|history|following`,
+  `POST /api/progress|follow`, `/hls/<id>.m3u8` (YouTube's master cut to
+  one variant: the best AVC up to 1080p, VP9 above; SDR preferred; its
+  audio group; absolute googlevideo https URIs the TV fetches itself),
+  `/thumb/<id>.jpg` (i.ytimg.com over http). SponsorBlock by hashed prefix
+  (`/api/skipSegments/<sha256[:4]>`), so the full video id is not sent.
+  State (follows, positions) in `~/.vibe-ythelper.json` on the helper's
+  machine. Runs on the PC for now (port 8770); to move to `fin`.
+- **TV** `ytui.c` + `yt.c` (+ `jfimg_get_url` for plain http images): a
+  YouTube card on Home (switch `yt.off`). Tabs Home (Continue watching,
+  then one shelf per followed channel), Search (the Jellyfin keyboard),
+  History; a channel grid. **OK on a card plays at once** (owner's UX
+  choice; resumes past 30 s), a loading screen with the thumbnail; the
+  details are in the overlay any navigation key shows: title, channel,
+  views, age, the SponsorBlock summary, the bar with skip (green) and
+  marked (yellow) segments, and actions on DOWN (Channel, Follow, From the
+  start, Description). BACK hides the overlay, then stops; the end or a
+  stop returns to the screen played from, with the card's progress.
+- SponsorBlock auto-skip: sponsor, selfpromo, interaction, music_offtopic
+  (yt.c `yt_auto_skip`), with a toast. Verified on the TV: "skipped
+  selfpromo 61.1-75.1" on an LTT video; progress saved to the helper.
+- Not yet: sign-in (device code), quality choice in the UI, live chat,
+  DeArrow, casting, playback speed, more results paging.

@@ -44,6 +44,7 @@
 #include "gam.h"
 #include "gfx.h"
 #include "jfui.h"
+#include "ytui.h"
 
 /* Noto Sans (OFL, native/fonts; deployed to /var/local/vibe/fonts), wider
  * Unicode coverage than the stock Roboto, which stays as the fallback */
@@ -64,7 +65,7 @@ static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 /* SIGUSR1: write the next frame (our layer only) to /tmp/vibe-shot.raw */
 static void on_usr1(int sig) { (void)sig; shot_flag = 1; }
 
-enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_INPUTS, S_RENAME_NAME, S_KEYBOARD, S_JELLYFIN };
+enum screen { S_NONE, S_HOME, S_QUICK, S_SETTINGS, S_INPUTS, S_RENAME_NAME, S_KEYBOARD, S_JELLYFIN, S_YOUTUBE };
 
 static const char *const picture_modes[] = {
      "Dynamic", "Standard", "Cinema Night", "Cinema Day", "Game", "Sport", "Calibrated"
@@ -249,6 +250,7 @@ struct app {
      double next_inputs, next_vol, next_pic;
      int  dirty;
      int  jf_avail;              /* the Jellyfin card on Home (jf.off absent) */
+     int  yt_avail;              /* the YouTube card on Home (yt.off absent) */
      int  gam;
      const char *gam_name;
 };
@@ -474,8 +476,8 @@ static void draw_home(struct app *a, cv_t *c)
           text_v(a, a->f_tiny, HOME_X, 600, 30, K_TEXT3, "SETTINGS", -1);
      }
 
-     /* the inputs, then Jellyfin; narrower cards if they would not fit */
-     int ncards = a->nvis + a->jf_avail, cw = CARD_W;
+     /* the inputs, then Jellyfin, then YouTube; narrower cards if they would not fit */
+     int ncards = a->nvis + a->jf_avail + a->yt_avail, cw = CARD_W;
      if (ncards > 0 && HOME_X + ncards * (CARD_W + CARD_GAP) - CARD_GAP > a->W - HOME_X)
           cw = (a->W - 2 * HOME_X - (ncards - 1) * CARD_GAP) / ncards;
      for (int k = 0; k < a->nvis; k++) {
@@ -487,6 +489,10 @@ static void draw_home(struct app *a, cv_t *c)
      if (a->jf_avail)
           home_card_w(a, c, HOME_X + a->nvis * (cw + CARD_GAP), 336, cw,
                       a->row == 0 && a->col == a->nvis, "Jellyfin", "Movies and shows", -1,
+                      0);
+     if (a->yt_avail)
+          home_card_w(a, c, HOME_X + (a->nvis + a->jf_avail) * (cw + CARD_GAP), 336, cw,
+                      a->row == 0 && a->col == a->nvis + a->jf_avail, "YouTube", "Videos, no ads", -1,
                       0);
      for (int k = 0; k < N_SETTINGS; k++)
           home_card_w(a, c, HOME_X + k * (SET_CARD_W + SET_CARD_GAP), 646, SET_CARD_W,
@@ -859,6 +865,7 @@ static void draw_screens(struct app *a, cv_t *c, double now)
      }
      case S_KEYBOARD:     draw_keyboard(a, c); break;
      case S_JELLYFIN:     jfui_draw(c, now); break;
+     case S_YOUTUBE:      ytui_draw(c, now); break;
      case S_NONE:         break;
      }
      if (a->nosig_shown && a->screen == S_NONE)
@@ -1353,6 +1360,8 @@ static void sleep_tick(struct app *a, double now)
           a->sleep_warned = 0;
           if (a->screen == S_JELLYFIN)
                jfui_close(now);                   /* reports the position */
+          if (a->screen == S_YOUTUBE)
+               ytui_close(now);
           a->screen = S_NONE;
           a->toast_until = 0;
           a->dirty = 1;
@@ -1435,15 +1444,26 @@ static void open_jellyfin(struct app *a, double now)
      jfui_open(&h, now);
 }
 
+static void open_youtube(struct app *a, double now)
+{
+     struct jfui_host h = {
+          a->s, a->f_title, a->f_head, a->f_item, a->f_bold, a->f_small, a->f_tiny,
+          a->W, a->H, a, jf_text, focus_fill, jf_hints, jf_sheet, a->f_sym
+     };
+     a->screen = S_YOUTUBE;
+     a->dirty = 1;
+     ytui_open(&h, now);
+}
+
 static void key_home(struct app *a, int k, double now)
 {
-     int ncol = a->row == 0 ? a->nvis + a->jf_avail : N_SETTINGS;
+     int ncol = a->row == 0 ? a->nvis + a->jf_avail + a->yt_avail : N_SETTINGS;
      switch (k) {
      case DIKS_CURSOR_LEFT:  if (a->col > 0) { a->col--; mark_focus(a); } break;
      case DIKS_CURSOR_RIGHT: if (a->col + 1 < ncol) { a->col++; mark_focus(a); } break;
      case DIKS_CURSOR_UP:
           if (a->row > 0) {
-               int n0 = a->nvis + a->jf_avail;
+               int n0 = a->nvis + a->jf_avail + a->yt_avail;
                a->row = 0;
                if (a->col >= n0) a->col = n0 > 0 ? n0 - 1 : 0;
                mark_focus(a);
@@ -1459,6 +1479,8 @@ static void key_home(struct app *a, int k, double now)
                a->dirty = 1;
           } else if (a->row == 0 && a->jf_avail && a->col == a->nvis) {
                open_jellyfin(a, now);
+          } else if (a->row == 0 && a->yt_avail && a->col == a->nvis + a->jf_avail) {
+               open_youtube(a, now);
           } else if (a->row == 1) {
                if (a->col < N_PAGES) {
                     a->page = a->col;
@@ -1857,6 +1879,13 @@ static void on_key(struct app *a, int k, int repeat, double now)
           return;
      }
      case DIKS_HOME:
+          if (a->screen == S_YOUTUBE) {
+               ytui_close(now);
+               open_screen(a, S_HOME, now);
+               a->row = 0;
+               a->col = a->nvis + a->jf_avail;
+               return;
+          }
           if (a->screen == S_JELLYFIN) {
                /* stops playback; Home opens on the Jellyfin card */
                jfui_close(now);
@@ -1877,6 +1906,11 @@ static void on_key(struct app *a, int k, int repeat, double now)
           else { a->screen = S_NONE; a->dirty = 1; }
           return;
      case DIKS_MENU:
+          if (a->screen == S_YOUTUBE) {
+               if (ytui_playing())
+                    return;
+               ytui_close(now);
+          }
           if (a->screen == S_JELLYFIN) {
                if (jfui_playing())
                     return;                       /* not over a film */
@@ -1886,6 +1920,11 @@ static void on_key(struct app *a, int k, int repeat, double now)
           else { a->page = PAGE_PICTURE; a->val_known = 0; open_screen(a, S_SETTINGS, now); }
           return;
      case KEY_INPUT:
+          if (a->screen == S_YOUTUBE) {
+               if (ytui_playing())
+                    return;
+               ytui_close(now);
+          }
           if (a->screen == S_JELLYFIN) {
                if (jfui_playing())
                     return;
@@ -1928,6 +1967,16 @@ static void on_key(struct app *a, int k, int repeat, double now)
                a->row = 0;
                a->col = a->nvis;
           } else if (jfui_tick(now)) {
+               a->dirty = 1;
+          }
+          break;
+     case S_YOUTUBE:
+          if (!ytui_key(k, repeat, now)) {
+               ytui_close(now);
+               open_screen(a, S_HOME, now);
+               a->row = 0;
+               a->col = a->nvis + a->jf_avail;
+          } else if (ytui_tick(now)) {
                a->dirty = 1;
           }
           break;
@@ -2132,6 +2181,7 @@ int main(int argc, char **argv)
      }
      load_hidden(a);                    /* before the first input list */
      a->jf_avail = jfui_available();
+     a->yt_avail = ytui_available();
      poll_inputs(a);
      a->bar_expected = read_bar_expected();
      printf("soundbar expected: %d (remembered)\n", a->bar_expected);
@@ -2261,12 +2311,14 @@ int main(int argc, char **argv)
           check_signal(a, now);
           if (jfui_tick(now) && a->screen == S_JELLYFIN)
                a->dirty = 1;
+          if (ytui_tick(now) && a->screen == S_YOUTUBE)
+               a->dirty = 1;
           /* no-signal standby: 4 min without signal on the current input,
            * then the last minute; a signal (or another input) ends it */
           /* (a Jellyfin film plays over an input with no signal) */
-          if (a->sleep_kind == OFF_NOSIG && (!a->nosig_lost || jfui_playing()))
+          if (a->sleep_kind == OFF_NOSIG && (!a->nosig_lost || jfui_playing() || ytui_playing()))
                sleep_cancel(a, "signal back", now, 0);
-          else if (a->nosig_standby && a->nosig_lost && !a->sleep_deadline && !jfui_playing() &&
+          else if (a->nosig_standby && a->nosig_lost && !a->sleep_deadline && !jfui_playing() && !ytui_playing() &&
                    now - a->nosig_since >= nosig_wait())
                nosig_arm(a, now);
           /* an action row's "OK again" ran out: draw it plain again */

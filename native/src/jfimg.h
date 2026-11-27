@@ -23,6 +23,10 @@ void jfimg_session(const struct jf_session *s);
  * for then) or if it failed */
 const struct jfimg *jfimg_get(const char *id, const char *kind, const char *tag, int w, int h);
 
+/* any http image (e.g. the YouTube helper's thumbnails), no session; same
+ * cache and rules as jfimg_get. url < 256 bytes. */
+const struct jfimg *jfimg_get_url(const char *url, int w, int h);
+
 /* 1 if an image arrived since the last call (time to redraw) */
 int jfimg_changed(void);
 

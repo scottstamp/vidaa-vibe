@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "common.h"
+#include "http.h"
 
 #define STBI_ONLY_JPEG
 #define STBI_ONLY_PNG
@@ -40,6 +41,7 @@ enum { E_FREE, E_QUEUED, E_LOADING, E_READY, E_FAILED };
 struct ent {
      int  state;
      char id[JF_ID], kind[16], tag[JF_ID];
+     char url[256];             /* jfimg_get_url: a plain http URL (no session) */
      struct jfimg img;
      double asked;              /* last time the UI wanted it */
      double done;               /* when it failed (retry later) */
@@ -130,13 +132,14 @@ static void *fetcher(void *arg)
                     if (now - E[i].asked > STALE_S) { E[i].state = E_FREE; continue; }
                     if (!e || E[i].asked > e->asked) e = &E[i];
                }
-               if (e && have_sess) break;
+               if (e && (have_sess || e->url[0])) break;
                pthread_cond_wait(&cond, &lock);
           }
           e->state = E_LOADING;
           struct jf_session s = sess;
-          char id[JF_ID], kind[16], tag[JF_ID];
+          char id[JF_ID], kind[16], tag[JF_ID], plain[256];
           int w = e->img.w, h = e->img.h;
+          snprintf(plain, sizeof plain, "%s", e->url);
           snprintf(id, sizeof id, "%s", e->id);
           snprintf(kind, sizeof kind, "%s", e->kind);
           snprintf(tag, sizeof tag, "%s", e->tag);
@@ -145,11 +148,23 @@ static void *fetcher(void *arg)
           char url[JF_URL_MAX], *data = NULL;
           size_t len = 0;
           uint32_t *px = NULL;
-          jf_image_url(&s, id, kind, tag, w, h, url);
-          if (jf_fetch(&s, url, &data, &len) == 0)
-               px = decode(data, len, w, h);
-          else
-               fprintf(stderr, "jellyfin: image %s/%s: %s\n", id, kind, jf_error());
+          if (plain[0]) {
+               struct http_buf b;
+               long st = 0;
+               char err[160];
+               if (http_request("GET", plain, NULL, NULL, 15000, &b, &st, err) == 0) {
+                    if (st == 200) { data = b.data; len = b.len; px = decode(data, len, w, h); }
+                    else { fprintf(stderr, "image %s: HTTP %ld\n", plain, st); http_buf_free(&b); }
+               } else {
+                    fprintf(stderr, "image %s: %s\n", plain, err);
+               }
+          } else {
+               jf_image_url(&s, id, kind, tag, w, h, url);
+               if (jf_fetch(&s, url, &data, &len) == 0)
+                    px = decode(data, len, w, h);
+               else
+                    fprintf(stderr, "jellyfin: image %s/%s: %s\n", id, kind, jf_error());
+          }
           free(data);
 
           pthread_mutex_lock(&lock);
@@ -182,7 +197,22 @@ static struct ent *slot(size_t need)
      }
 }
 
+static const struct jfimg *get(const char *id, const char *kind, const char *tag, const char *url,
+                               int w, int h);
+
 const struct jfimg *jfimg_get(const char *id, const char *kind, const char *tag, int w, int h)
+{
+     return get(id, kind, tag, "", w, h);
+}
+
+const struct jfimg *jfimg_get_url(const char *url, int w, int h)
+{
+     if (!url || strlen(url) >= sizeof E[0].url) return NULL;
+     return get("url", "url", "", url, w, h);
+}
+
+static const struct jfimg *get(const char *id, const char *kind, const char *tag, const char *url,
+                               int w, int h)
 {
      if (!id || !id[0] || w <= 0 || h <= 0 || w > 2048 || h > 2048) return NULL;
      double now = vibe_now_s();
@@ -195,7 +225,7 @@ const struct jfimg *jfimg_get(const char *id, const char *kind, const char *tag,
      struct ent *e = NULL;
      for (int i = 0; i < MAX_ENT; i++)
           if (E[i].state != E_FREE && E[i].img.w == w && E[i].img.h == h &&
-              !strcmp(E[i].id, id) && !strcmp(E[i].kind, kind)) { e = &E[i]; break; }
+              !strcmp(E[i].id, id) && !strcmp(E[i].kind, kind) && !strcmp(E[i].url, url)) { e = &E[i]; break; }
      if (e) {
           e->asked = now;
           if (e->state == E_READY) out = &e->img;
@@ -205,6 +235,7 @@ const struct jfimg *jfimg_get(const char *id, const char *kind, const char *tag,
           snprintf(e->id, sizeof e->id, "%s", id);
           snprintf(e->kind, sizeof e->kind, "%s", kind);
           snprintf(e->tag, sizeof e->tag, "%s", tag ? tag : "");
+          snprintf(e->url, sizeof e->url, "%s", url);
           e->img.w = w;
           e->img.h = h;
           e->asked = now;
