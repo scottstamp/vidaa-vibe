@@ -393,3 +393,15 @@ Followed SmartTube (MediaServiceCore, cloned 2026-11-26 at 3e82ef2).
     test on fin.
   - The video then moved to the top of the account's FEhistory.
   - debug_signed_in is off again.
+- **Resume from YouTube's position:**
+  - YouTube's own lists carry a watched-percent marker
+    (`thumbnailOverlayResumePlaybackRenderer`). The card's position is
+    that percent × the duration.
+  - On OK, the panel used to replace the card with the helper's details.
+    Those know only positions saved here, so a video watched elsewhere
+    started at 0.
+  - Now the card's position is kept when the details have none. A
+    position saved here still wins.
+  - Tested: `FEpojejgNrY` from the History tab started at about 502 s of
+    2395 (YouTube's 21%).
+  - Precision is 1% of the length, about 24 s here.

@@ -1103,7 +1103,12 @@ static void apply(struct result *r, double now)
           U.det = r->vid;
           memset(&r->vid, 0, sizeof r->vid);
           U.have_det = 1;
-          /* the helper's copy has more (views, date, position) */
+          /* the helper's copy has more (views, date, position); but its
+           * position is only what was saved here: a card from YouTube's own
+           * lists (History, Home) knows where the account left off
+           * elsewhere (YouTube's watched-percent marker) */
+          double card_pos = !strcmp(U.playing.id, U.det.it.id) ? U.playing.position : 0;
+          if (U.det.it.position <= 0 && card_pos > 0) U.det.it.position = card_pos;
           U.playing = U.det.it;
           U.live = r->play.live || U.det.it.live;
           U.dur_ms = r->play.duration > 0 ? r->play.duration * 1000.0 : U.det.it.duration * 1000.0;
