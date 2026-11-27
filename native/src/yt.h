@@ -119,6 +119,10 @@ int  yt_signout(void);
 int  yt_settings(int set_dearrow, int *dearrow);
 /* autoplay of the next video (a helper setting too); set < 0 only reads */
 int  yt_autoplay(int set, int *on);
+/* watch history (a helper setting): signed in and on, what plays here is
+ * reported to the account's YouTube history and the History tab shows that
+ * history; otherwise the tab shows what was played here. set < 0 only reads */
+int  yt_watch_history(int set, int *on);
 
 /* what YouTube suggests after a video; its top comments (up to max) */
 int  yt_related(const char *id, struct yt_list *out);

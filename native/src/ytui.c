@@ -50,7 +50,7 @@
 enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW,
                 JB_ACCOUNT, JB_SIGNIN, JB_POLL, JB_SIGNOUT, JB_SETTINGS,
                 JB_RSTART, JB_RSTATUS, JB_RSTATE, JB_REMOTE /* a phone's command (remote thread) */,
-                JB_RELATED, JB_COMMENTS, JB_AUTOPLAY };
+                JB_RELATED, JB_COMMENTS, JB_AUTOPLAY, JB_WATCHHIST };
 
 struct job {
      enum job_kind kind;
@@ -64,6 +64,7 @@ struct job {
 struct result {
      enum job_kind kind;
      int  gen, rc, flag, n;
+     int  flag2;                   /* JB_ACCOUNT: watch history on */
      char err[200];
      char id[32];
      struct yt_home home;
@@ -153,7 +154,7 @@ static void *worker(void *arg)
           case JB_FOLLOW:   r->rc = yt_follow(j.id, j.flag); break;
           case JB_ACCOUNT:                              /* and the settings */
                r->rc = yt_account(&r->acct);
-               if (r->rc == 0) { yt_settings(-1, &r->n); yt_autoplay(-1, &r->flag); }
+               if (r->rc == 0) { yt_settings(-1, &r->n); yt_autoplay(-1, &r->flag); yt_watch_history(-1, &r->flag2); }
                break;
           case JB_SETTINGS: r->rc = yt_settings(j.flag, &r->n); break;
           case JB_RSTART:
@@ -169,6 +170,7 @@ static void *worker(void *arg)
                r->rc = r->comm ? yt_comments(j.id, r->comm, 40, &r->ncomm) : -1;
                break;
           case JB_AUTOPLAY: r->rc = yt_autoplay(j.flag, &r->flag); break;
+          case JB_WATCHHIST: r->rc = yt_watch_history(j.flag, &r->flag); break;
           case JB_SIGNIN:   r->rc = yt_signin_start(r->code, sizeof r->code, r->url, sizeof r->url); break;
           case JB_POLL:
                r->rc = yt_signin_poll(&r->flag, r->acct.name, sizeof r->acct.name);
@@ -225,7 +227,7 @@ static struct {
      /* the account tab: what the helper says; a sign-in in progress */
      struct yt_account acct;
      int  acct_known;
-     int  set_sel;                 /* the Settings tab's focused button: 0 account, 1 DeArrow */
+     int  set_sel;                 /* the Settings tab's focused button: 0 account, 1 casting, 2 autoplay, 3 DeArrow, 4 watch history */
      int  dearrow;                 /* the helper's DeArrow setting */
      int  srch_count, srch_more;   /* results asked for; a "more" request out */
 
@@ -246,6 +248,7 @@ static struct {
      struct yt_comment *comm;
      int  ncomm, comm_top, comm_on, comm_loading;
      int  autoplay;
+     int  whist;                   /* watch history: reported to YouTube, its History tab */
      int  upnext;                  /* the end: counting down to rel.items[0] */
      double upnext_until;
      char code[32], code_url[128];
@@ -936,7 +939,7 @@ static void apply(struct result *r, double now)
      }
      switch (r->kind) {                                  /* the account tab (any screen) */
      case JB_ACCOUNT:
-          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; U.dearrow = r->n; U.autoplay = r->flag; }
+          if (r->rc == 0) { U.acct = r->acct; U.acct_known = 1; U.dearrow = r->n; U.autoplay = r->flag; U.whist = r->flag2; }
           else set_err(r->err, now);
           U.dirty = 1;
           return;
@@ -1010,6 +1013,10 @@ static void apply(struct result *r, double now)
           return;
      case JB_AUTOPLAY:
           if (r->rc == 0) U.autoplay = r->flag;
+          U.dirty = 1;
+          return;
+     case JB_WATCHHIST:
+          if (r->rc == 0) U.whist = r->flag;
           U.dirty = 1;
           return;
      case JB_SETTINGS:
@@ -1529,9 +1536,9 @@ static int kb_key(int k, int repeat, double now)
      return 1;
 }
 
-/* the Settings tab: three rows (account, phone casting, DeArrow), one button
- * each; UP/DOWN between them, OK presses */
-#define SET_ROWS 4
+/* the Settings tab: five rows (account, phone casting, autoplay, DeArrow,
+ * watch history), one button each; UP/DOWN between them, OK presses */
+#define SET_ROWS 5
 static int account_key(int k, int repeat, double now)
 {
      switch (k) {
@@ -1548,6 +1555,11 @@ static int account_key(int k, int repeat, double now)
           if (repeat) return 1;
           if (U.set_sel == 2) {                          /* autoplay on/off */
                struct job j = { .kind = JB_AUTOPLAY, .flag = !U.autoplay };
+               post(j);
+               break;
+          }
+          if (U.set_sel == 4) {                          /* watch history on/off */
+               struct job j = { .kind = JB_WATCHHIST, .flag = !U.whist };
                post(j);
                break;
           }
@@ -1938,8 +1950,7 @@ static void draw_account(struct canvas *c, double now)
           y += 340;
      } else if (U.acct.signed_in) {
           snprintf(name, sizeof name, "Signed in%s%s", U.acct.name[0] ? " as " : "", U.acct.name);
-          set_row(c, y, 0, name, "Home shows your subscriptions, Watch later, likes and recommendations. "
-                  "Videos played here are not added to your YouTube history.",
+          set_row(c, y, 0, name, "Home shows your subscriptions, Watch later, likes and recommendations.",
                   U.confirm_until > now ? "Press OK again to sign out" : "Sign out");
           y += 170;
      } else {
@@ -1968,6 +1979,14 @@ static void draw_account(struct canvas *c, double now)
      set_row(c, y, 3, "DeArrow", "Community-submitted titles and thumbnails in place of clickbait "
              "(dearrow.ajay.app). Only a short hash prefix of each video id is sent.",
              U.dearrow ? "On" : "Off");
+     y += 170;
+     /* watch history */
+     set_row(c, y, 4, "Watch history",
+             !U.acct.signed_in ? "Signed in: add what plays here to your YouTube history, and show that history "
+                                 "in the History tab."
+             : U.whist ? "What plays here is added to your YouTube history; the History tab shows it."
+                       : "Off: nothing is sent to YouTube; the History tab shows what was played on this TV.",
+             U.whist ? "On" : "Off");
 }
 static void draw_toast(struct canvas *c, double now)
 {

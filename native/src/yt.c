@@ -408,6 +408,19 @@ int yt_autoplay(int set, int *on)
      return 0;
 }
 
+int yt_watch_history(int set, int *on)
+{
+     char path[64];
+     snprintf(path, sizeof path, set < 0 ? "/api/settings" : "/api/settings?history=%d", set);
+     cJSON *j = call(set < 0 ? "GET" : "POST", path, 15000);
+     if (!j) return -1;
+     /* absent (an older helper): off, it cannot report */
+     const cJSON *a = cJSON_GetObjectItemCaseSensitive(j, "history");
+     *on = a ? cJSON_IsTrue(a) : 0;
+     cJSON_Delete(j);
+     return 0;
+}
+
 int yt_related(const char *id, struct yt_list *out)
 {
      char path[64];

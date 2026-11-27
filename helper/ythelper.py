@@ -19,7 +19,9 @@ API (GET unless noted; JSON):
   /api/channel?id=UC...&n=48      {title, id, followed, items}
   /api/video?id=...               details, SponsorBlock segments, saved position
   /api/play?id=...&maxh=1080      {url, mime, duration, live}
-  /api/history?n=60               videos, most recent first
+  /api/history?n=60               {items, source}: the account's YouTube history (signed in,
+                                  history on) or the local one; most recent first
+  /api/settings                   {dearrow, autoplay, history}; POST ?dearrow= / ?autoplay= / ?history=0|1
   /api/following                  channels
   POST /api/progress?id=&pos=&dur=   seconds; signed in, also the account's watch history
   POST /api/follow?id=UC...&on=0|1
@@ -292,6 +294,8 @@ def video(vid):
     if v is None:
         url = "https://www.youtube.com/watch?v=" + vid
         try:
+            if setting("debug_signed_in"):         # test aid: POST /api/settings?debug_signed_in=1
+                raise yt_dlp.utils.DownloadError("debug: sign in")
             v = extract(url)
         except yt_dlp.utils.DownloadError as e:
             tok = access_token() if NEEDS_ACCOUNT.search(str(e)) else None
@@ -849,6 +853,21 @@ def tv_playlist(browse_id, pages=2):
         tok = next_token(more.get("continuationContents") or {})
     return items
 
+def history(n):
+    """the History tab: signed in with history reporting on, the account's
+    YouTube history (FEhistory); otherwise what was played here.
+    {items, source: "youtube" | "local"}"""
+    if not setting("history_off") and auth_state().get("refresh_token"):
+        k = "FEhistory"
+        items = LIST_CACHE.get(k)
+        try:
+            if items is None:
+                items = LIST_CACHE.put(k, tv_playlist("FEhistory", pages=3))
+            return {"items": with_positions(items[:n]), "source": "youtube"}
+        except Exception as e:
+            print("history: YouTube's: %r; showing the local one" % e, file=sys.stderr)
+    return {"items": with_positions(STATE.recent(n, False)), "source": "local"}
+
 def account_name():
     try:
         d = innertube("account/accounts_list", {"accountReadMask": {"returnOwner": True,
@@ -1024,10 +1043,13 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/play":
                 return self.send(200, play_info(vid, int(q.get("maxh", 1080)), self.base()))
             if p == "/api/history":
-                return self.send(200, {"items": with_positions(STATE.recent(int(q.get("n", 60)), False))})
+                return self.send(200, history(int(q.get("n", 60))))
             if p == "/api/settings":
                 if self.command == "POST" and "dearrow" in q:
                     set_setting("dearrow", q["dearrow"] == "1")
+                if self.command == "POST" and "debug_signed_in" in q:
+                    set_setting("debug_signed_in", q["debug_signed_in"] == "1")
+                    VIDEO_CACHE.d.clear()
                 if self.command == "POST" and "history" in q:
                     set_setting("history_off", q["history"] != "1")      # on unless turned off
                 if self.command == "POST" and "autoplay" in q:
@@ -1074,6 +1096,7 @@ class H(BaseHTTPRequestHandler):
                     tok = access_token()
                     if tok:
                         HISTORY.report(vid, pos, tok)
+                        LIST_CACHE.d.pop("FEhistory", None)
                 return self.send(200, {"ok": True})
             if p == "/api/follow" and self.command == "POST":
                 on = q.get("on", "1") == "1"

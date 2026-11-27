@@ -352,7 +352,7 @@ Followed SmartTube (MediaServiceCore, cloned 2026-11-26 at 3e82ef2).
     `EXT-X-BYTERANGE` per fragment, with the googlevideo URL itself.
   - Checked on fin with ffprobe and ffmpeg: h264 1080p + aac. 8 s remuxed
     from the start. A `-ss 1800` seek in ffmpeg did not finish in 5 min.
-  - **Not yet tried on the TV (HMP).**
+  - **On the TV (2026-11-26):** see "TV test" below.
 - **History reporting** (`ytauth.History`, after SmartTube's
   `TrackingService`):
   - It reads `ei`, `vm` and `of` from a signed-in player response.
@@ -365,3 +365,31 @@ Followed SmartTube (MediaServiceCore, cloned 2026-11-26 at 3e82ef2).
     yet).
   - Measured: one progress post for `UavAPFZtJIo` moved it from place 4
     to the top of the account's FEhistory.
+
+### Watch history setting and the TV test (2026-11-26)
+
+- Settings has a fifth row, **Watch history** (On by default; helper
+  setting `history`).
+  - On: what plays is reported to the account's history, and the History
+    tab shows the account's own YouTube history (`/api/history` → TVHTML5
+    browse `FEhistory`, 3 continuations, about 60 videos; source
+    `youtube`).
+  - Off, or signed out: nothing is reported, and the tab shows what was
+    played on this TV (source `local`).
+  - The cached history is dropped on each progress post.
+- Tested over the dev hook:
+  - Toggled Off and On; the helper followed each time.
+  - The History tab showed the account's history, newest first. The
+    first card was the video reported in the probe above.
+- **Signed-in playback on the TV:**
+  - The helper's test aid `POST /api/settings?debug_signed_in=1` sends
+    every video through the signed-in route. It also clears the video
+    cache. Turn it off after.
+  - With it on, `2YnbwaDjzoQ` played from the History tab: byte-range HLS
+    built from the DASH files, 1080p AVC (`299`) and AAC (`140`).
+  - HMP played it; position advanced normally.
+  - 30 presses of RIGHT (+300 s) moved it from about 75 s to 380 s, and it
+    kept playing. So HMP seeks in byte-range playlists, unlike the ffmpeg
+    test on fin.
+  - The video then moved to the top of the account's FEhistory.
+  - debug_signed_in is off again.
