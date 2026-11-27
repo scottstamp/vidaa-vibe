@@ -302,3 +302,5 @@ finds the screen again by itself after the helper restarts, `ctt`.
   `signatureTimestamp` (needs a BotGuard PoToken, which SmartTube makes in
   V8), and yt-dlp with our bearer header gets HTTP 400. Probes:
   `helper/probe_authplay.py`.
+
+- **Phone casting tested by the owner** (2026-11-27): linked with a TV code from the YouTube app; casting, pause, seek and stop work as expected.
