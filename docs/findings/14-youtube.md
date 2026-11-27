@@ -296,11 +296,72 @@ finds the screen again by itself after the helper restarts, `ctt`.
   suggestion, the player kept on DMP between videos ("stop keep"); with a
   phone connected the phone's queue decides instead (`state=ended`). The
   SponsorBlock summary line is gone (the bar shows the segments).
-- **Not possible yet:** reporting watches to YouTube and signed-in
-  playback (members-only, age-restricted): the TV client's `player`
-  request answers "The page needs to be reloaded" even with
-  `signatureTimestamp` (needs a BotGuard PoToken, which SmartTube makes in
-  V8), and yt-dlp with our bearer header gets HTTP 400. Probes:
-  `helper/probe_authplay.py`.
+- ~~Not possible yet: reporting watches and signed-in playback~~: solved
+  without a PoToken, see "Signed-in playback and watch history" below.
 
 - **Phone casting tested by the owner** (2026-11-27): linked with a TV code from the YouTube app; casting, pause, seek and stop work as expected.
+
+## Signed-in playback and watch history (2026-11-26, branch pot-provider)
+
+Followed SmartTube (MediaServiceCore, cloned 2026-11-26 at 3e82ef2).
+
+- **The PoToken is not what blocked us.** SmartTube's signed-in player
+  client is `TV_DOWNGRADED` (`videoinfo/V2/VideoInfoService.java`): TVHTML5
+  `5.20260901`, user agent `Mozilla/5.0 (DirectFB; Linux x86_64)
+  Cobalt/4.13031-qa (unlike Gecko) Starboard/1`. It also needs the visitor
+  data of the `/tv` page fetched with that agent, and the 5-digit
+  `signatureTimestamp` of that page's non-TCL player (20779 on the day).
+  Sent with our OAuth bearer, the request returns `OK`, including for
+  age-restricted `HtVdAasjOgU`; without the account it returns
+  LOGIN_REQUIRED. The formats carry plain URLs, and `playbackTracking` has
+  `videostatsPlaybackUrl` and `videostatsWatchtimeUrl`. Our earlier "The
+  page needs to be reloaded" came from mismatched agent, version, visitor
+  data and timestamp. Measured with `helper/probe_tvdown.py`.
+- The 7.x TV client (`TV` in SmartTube) does want the session PoToken.
+  `helper/ytpot.mjs` mints it the way SmartTube's `TvPoTokenProvider` +
+  `TvPoTokenWebView4` do: Node with jsdom in place of the WebView. The
+  steps are `tv_config` challengeRequestKey, then `/tv`
+  LIVING_ROOM_PO_TOKEN_ID, then `att/get` for TVHTML5, then BotGuard, then
+  `GenerateIT`. It produced a 124-character token in 1.4 s on fin. Node
+  needs `--max-http-header-size=131072`: YouTube's headers overflow
+  undici's 16 KB default. With the token, the 7.x client now answers
+  **SABR only** (`serverAbrStreamingUrl`, no per-format URLs). It is no use
+  to HMP, so the helper does not run the minter. It is installed under
+  `/opt/vibe-ythelper/pot` (with jsdom) for later.
+- The raw URLs answer 403 until `n` is solved, so the helper lets yt-dlp
+  do the extraction. `helper/ytauth.py` patches yt-dlp's `_call_api`: when
+  the params carry the bearer, the `tv_downgraded` player request goes out
+  with SmartTube's agent, version, `/tv` visitor data and
+  `lockedSafetyMode=false`. No other request changes.
+  - A bearer in `http_headers` went on the WEB `next` call too, and that
+    call gave HTTP 400. That was the old 400.
+  - The player JS variant must stay yt-dlp's default, `tv`. Its n solver
+    fails on `main` ("a.addOnDisposeCallback is not a function").
+  - Result: age-restricted 1080p, 30 formats, `needs_auth`; 4K test video
+    to 2160p. Streams fetch 200.
+- **Playback:**
+  - The helper tries anonymous first, as before. Notably, yt-dlp's current
+    anonymous clients (`tv_samsung`, `visionos`) already play
+    `HtVdAasjOgU`.
+  - If yt-dlp says the video needs an account (sign in, age, members,
+    private) and the TV is signed in, it extracts again signed in.
+  - That gives DASH files only. The helper serves them as HLS: a master
+    with one AVC video (up to the quality cap) and the English original
+    AAC (not the DRC copy). Each media playlist (`/hlsf/ID/FORMAT.m3u8`)
+    is built from the file's `sidx`: `EXT-X-MAP` for ftyp+moov, then one
+    `EXT-X-BYTERANGE` per fragment, with the googlevideo URL itself.
+  - Checked on fin with ffprobe and ffmpeg: h264 1080p + aac. 8 s remuxed
+    from the start. A `-ss 1800` seek in ffmpeg did not finish in 5 min.
+  - **Not yet tried on the TV (HMP).**
+- **History reporting** (`ytauth.History`, after SmartTube's
+  `TrackingService`):
+  - It reads `ei`, `vm` and `of` from a signed-in player response.
+  - It sends `/api/stats/playback` (watch record), then
+    `/api/stats/watchtime` with st/et/cmt, using the bearer. A resume past
+    3 min starts the record there; the record is renewed after 30 min.
+    Within 5% of the end it sends `final=1` (watched).
+  - It is driven by the TV's 10 s progress posts and sends at most once a
+    minute. Setting `history` in `/api/settings` (on by default; no TV row
+    yet).
+  - Measured: one progress post for `UavAPFZtJIo` moved it from place 4
+    to the top of the account's FEhistory.

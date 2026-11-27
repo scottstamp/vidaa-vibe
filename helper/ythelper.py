@@ -21,9 +21,10 @@ API (GET unless noted; JSON):
   /api/play?id=...&maxh=1080      {url, mime, duration, live}
   /api/history?n=60               videos, most recent first
   /api/following                  channels
-  POST /api/progress?id=&pos=&dur=   seconds
+  POST /api/progress?id=&pos=&dur=   seconds; signed in, also the account's watch history
   POST /api/follow?id=UC...&on=0|1
-  /hls/<id>.m3u8?maxh=1080        the trimmed HLS master
+  /hls/<id>.m3u8?maxh=1080        the trimmed HLS master (signed-in DASH files: one built here)
+  /hlsf/<id>/<format>.m3u8        a DASH file as an HLS media playlist (byte ranges)
   /thumb/<id>.jpg?s=m|l           video thumbnail (320x180 | 1280x720)
   /avatar/<channel id>.jpg        channel avatar (if known)
  casting from the phone's YouTube app ("Link with TV code"; ytlounge.py):
@@ -41,6 +42,7 @@ import yt_dlp
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # python -I leaves it out
 import ytlounge
 import ytextra
+import ytauth
 
 ARGS = None
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
@@ -280,10 +282,25 @@ def channel(cid, n):
     out["followed"] = STATE.is_followed(cid)
     return out
 
+NEEDS_ACCOUNT = re.compile(r"sign in|confirm your age|members|join this channel|login|private video", re.I)
+
 def video(vid):
+    """yt-dlp's info, anonymous (YouTube's HLS); what needs an account
+    (age-restricted, members-only) signed in, as SmartTube does (ytauth.py:
+    DASH files only, which the helper serves as HLS, dash_master)"""
     v = VIDEO_CACHE.get(vid)
     if v is None:
-        v = VIDEO_CACHE.put(vid, extract("https://www.youtube.com/watch?v=" + vid))
+        url = "https://www.youtube.com/watch?v=" + vid
+        try:
+            v = extract(url)
+        except yt_dlp.utils.DownloadError as e:
+            tok = access_token() if NEEDS_ACCOUNT.search(str(e)) else None
+            if not tok:
+                raise
+            v = extract(url, extra={ytauth.PARAM: tok,
+                                    "extractor_args": {"youtube": {"player_client": [ytauth.CLIENT]}}})
+            v["vibe_signed_in"] = True
+        v = VIDEO_CACHE.put(vid, v)
     return v
 
 def sponsor_segments(vid):
@@ -334,12 +351,12 @@ def hls_master_url(v):
             return f["manifest_url"]
     return None
 
-def trimmed_master(vid, maxh):
+def trimmed_master(vid, maxh, base):
     """YouTube's master with one variant (and its audio group)"""
     v = video(vid)
     url = hls_master_url(v)
     if not url:
-        return None
+        return dash_master(v, maxh, base)
     text = urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}),
                                   timeout=15).read().decode("utf-8", "replace")
     lines = text.splitlines()
@@ -398,10 +415,123 @@ def pick_audio(media):
                 return l if "DEFAULT=YES" in l else l + ",DEFAULT=YES"
     return media[0]
 
+# ------------------------------------------------------------------ DASH files as HLS
+#
+# Signed-in playback (ytauth.py) gets YouTube's DASH files only: one fMP4
+# file per format, ftyp + moov, then a sidx indexing its fragments. HLS can
+# play such a file as is (EXT-X-MAP for the init part, EXT-X-BYTERANGE per
+# fragment), so the helper writes a playlist per format from the sidx, and
+# a master with one AVC video (up to 1080p) and one AAC audio. The TV
+# fetches the bytes from googlevideo itself, as with YouTube's own HLS.
+
+DASH_CACHE = Cache(3 * 3600, 64)
+HISTORY = ytauth.History()       # watches reported to the signed-in account
+
+def dash_formats(v, maxh):
+    fm = [f for f in v.get("formats") or [] if f.get("protocol") == "https" and f.get("url")]
+    vids = [f for f in fm if (f.get("vcodec") or "").startswith("avc1") and f.get("acodec") in (None, "none")
+            and f.get("ext") == "mp4" and (f.get("height") or 0) <= maxh]
+    auds = [f for f in fm if (f.get("acodec") or "").startswith("mp4a") and f.get("vcodec") in (None, "none")]
+    if not vids or not auds:
+        return None, None
+    vf = max(vids, key=lambda f: (f.get("height") or 0, f.get("fps") or 0, f.get("tbr") or 0))
+    def lang(f):
+        return (f.get("language") or "").lower()
+    def original(f):
+        note = (f.get("format_note") or "").lower()
+        return "original" in note or "dubbed" not in note
+    for t in (lambda f: lang(f).startswith("en") and original(f), lambda f: lang(f).startswith("en"),
+              original, lambda f: True):
+        c = [f for f in auds if t(f)]
+        if c:
+            # not the DRC (dynamic range compressed) copy
+            return vf, max(c, key=lambda f: ("drc" not in (f.get("format_id") or "").lower(), f.get("tbr") or 0))
+    return vf, auds[0]
+
+def dash_master(v, maxh, base):
+    vf, af = dash_formats(v, maxh)
+    if not vf:
+        return None
+    vid = v["id"]
+    bw = int(((vf.get("tbr") or 0) + (af.get("tbr") or 0)) * 1000) or 2000000
+    out = ["#EXTM3U", "#EXT-X-INDEPENDENT-SEGMENTS",
+           '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="audio",LANGUAGE="%s",DEFAULT=YES,AUTOSELECT=YES,URI="%s/hlsf/%s/%s.m3u8"'
+           % ((af.get("language") or "en")[:8], base, vid, af["format_id"]),
+           '#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS="%s,%s",AUDIO="a"'
+           % (bw, vf.get("width") or 0, vf.get("height") or 0, vf["vcodec"], af["acodec"]),
+           "%s/hlsf/%s/%s.m3u8" % (base, vid, vf["format_id"])]
+    return "\n".join(out) + "\n"
+
+def boxes(b, start=0):
+    """(type, offset, size) of the top-level MP4 boxes that fit in b"""
+    off = start
+    while off + 8 <= len(b):
+        size = int.from_bytes(b[off:off + 4], "big")
+        typ = b[off + 4:off + 8].decode("latin-1")
+        hdr = 8
+        if size == 1 and off + 16 <= len(b):
+            size, hdr = int.from_bytes(b[off + 8:off + 16], "big"), 16
+        if size < hdr:
+            return
+        yield typ, off, size
+        off += size
+
+def sidx_refs(b, off, size):
+    """[(offset, size, seconds)] of the fragments a sidx box lists"""
+    p = off + 8
+    ver = b[p]
+    p += 4 + 4                                   # version+flags, reference_ID
+    timescale = int.from_bytes(b[p:p + 4], "big"); p += 4
+    n = 8 if ver else 4
+    p += n                                       # earliest_presentation_time
+    first = int.from_bytes(b[p:p + n], "big"); p += n
+    p += 2                                       # reserved
+    count = int.from_bytes(b[p:p + 2], "big"); p += 2
+    at = off + size + first
+    refs = []
+    for _ in range(count):
+        r = int.from_bytes(b[p:p + 4], "big")
+        dur = int.from_bytes(b[p + 4:p + 8], "big")
+        p += 12
+        if r >> 31:
+            raise ValueError("hierarchical sidx")
+        refs.append((at, r & 0x7fffffff, dur / timescale))
+        at += r & 0x7fffffff
+    return refs
+
+def dash_playlist(vid, fid):
+    k = (vid, fid)
+    t = DASH_CACHE.get(k)
+    if t:
+        return t
+    f = next((f for f in video(vid).get("formats") or [] if f.get("format_id") == fid), None)
+    if not f:
+        return None
+    url = f["url"]
+    head = b""
+    for n in (65536, 1048576):
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-%d" % (n - 1)})
+        head = urllib.request.urlopen(req, timeout=20).read()
+        sx = next(((o, s) for typ, o, s in boxes(head) if typ == "sidx" and o + s <= len(head)), None)
+        if sx:
+            break
+    else:
+        raise LookupError("no sidx in format %s" % fid)
+    init_len = sx[0]                              # ftyp + moov: everything before the sidx
+    refs = sidx_refs(head, *sx)
+    out = ["#EXTM3U", "#EXT-X-VERSION:7",
+           "#EXT-X-TARGETDURATION:%d" % max(1, int(max(r[2] for r in refs) + 0.999)),
+           "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-INDEPENDENT-SEGMENTS",
+           '#EXT-X-MAP:URI="%s",BYTERANGE="%d@0"' % (url, init_len)]
+    for at, size, dur in refs:
+        out += ["#EXTINF:%.3f," % dur, "#EXT-X-BYTERANGE:%d@%d" % (size, at), url]
+    out.append("#EXT-X-ENDLIST")
+    return DASH_CACHE.put(k, "\n".join(out) + "\n")
+
 def play_info(vid, maxh, base):
     v = video(vid)
     live = bool(v.get("is_live"))
-    if hls_master_url(v):
+    if hls_master_url(v) or (not live and dash_formats(v, maxh)[0]):
         return {"url": "%s/hls/%s.m3u8?maxh=%d" % (base, vid, maxh), "mime": "application/x-mpegURL",
                 "duration": int(v.get("duration") or 0), "live": live}
     # no HLS: the muxed 360p file (https; the TV verifies it)
@@ -898,10 +1028,13 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/settings":
                 if self.command == "POST" and "dearrow" in q:
                     set_setting("dearrow", q["dearrow"] == "1")
+                if self.command == "POST" and "history" in q:
+                    set_setting("history_off", q["history"] != "1")      # on unless turned off
                 if self.command == "POST" and "autoplay" in q:
                     set_setting("autoplay_off", q["autoplay"] != "1")      # on unless turned off
                     LIST_CACHE.d.clear()
-                return self.send(200, {"dearrow": setting("dearrow"), "autoplay": not setting("autoplay_off")})
+                return self.send(200, {"dearrow": setting("dearrow"), "autoplay": not setting("autoplay_off"),
+                                       "history": not setting("history_off")})
             if p == "/api/related":
                 return self.send(200, {"items": with_positions(ytextra.related(vid))[:30]})
             if p == "/api/comments":
@@ -935,7 +1068,12 @@ class H(BaseHTTPRequestHandler):
                 if v:
                     meta = {"title": v.get("title"), "channel": v.get("channel"),
                             "channel_id": v.get("channel_id")}
-                STATE.set_progress(vid, float(q.get("pos", 0)), float(q.get("dur", 0)), meta)
+                pos = float(q.get("pos", 0))
+                STATE.set_progress(vid, pos, float(q.get("dur", 0)), meta)
+                if pos > 0 and not setting("history_off") and auth_state().get("refresh_token"):
+                    tok = access_token()
+                    if tok:
+                        HISTORY.report(vid, pos, tok)
                 return self.send(200, {"ok": True})
             if p == "/api/follow" and self.command == "POST":
                 on = q.get("on", "1") == "1"
@@ -947,8 +1085,12 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, {"ok": True, "followed": on})
             m = re.match(r"^/hls/([\w-]{11})\.m3u8$", p)
             if m:
-                t = trimmed_master(m.group(1), int(q.get("maxh", 1080)))
+                t = trimmed_master(m.group(1), int(q.get("maxh", 1080)), self.base())
                 return self.send(200 if t else 404, t or "no HLS", "application/x-mpegURL")
+            m = re.match(r"^/hlsf/([\w-]{11})/([\w-]{1,24})\.m3u8$", p)
+            if m:
+                t = dash_playlist(m.group(1), m.group(2))
+                return self.send(200 if t else 404, t or "no such format", "application/x-mpegURL")
             m = re.match(r"^/thumb/([\w-]{11})\.jpg$", p)
             if m:
                 b = thumb(m.group(1), q.get("s", "m"), q.get("da") == "1")
