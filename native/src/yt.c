@@ -44,6 +44,19 @@ void yt_config_load(void)
      while (l && base[l - 1] == '/') base[--l] = 0;
 }
 
+int yt_set_maxh(int h)
+{
+     maxh = h;
+     const char *path = getenv("YT_STATE") ? getenv("YT_STATE") : YT_STATE_FILE;
+     char tmp[300];
+     snprintf(tmp, sizeof tmp, "%s.new", path);
+     FILE *f = fopen(tmp, "w");
+     if (!f) return -1;
+     fprintf(f, "helper=%s\nmaxh=%d\n", base, maxh);
+     if (fclose(f) != 0 || rename(tmp, path) != 0) { remove(tmp); return -1; }
+     return 0;
+}
+
 /* GET/POST base+path -> parsed JSON (caller deletes), NULL on failure */
 static cJSON *call(const char *method, const char *path, long timeout_ms)
 {

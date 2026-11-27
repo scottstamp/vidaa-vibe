@@ -75,6 +75,8 @@ struct yt_play {
 void yt_config_load(void);
 const char *yt_base(void);
 int  yt_maxh(void);
+/* change the quality cap and save it in the state file (0 on success) */
+int  yt_set_maxh(int h);
 
 int  yt_home(struct yt_home *out);
 int  yt_search(const char *q, int n, struct yt_list *out);

@@ -146,3 +146,25 @@ public IP as the TV's (checked), so the TV fetches what fin resolves. The
 TV's `/var/local/vibe/state/youtube` says `helper=http://192.168.2.31:8770`
 (owned by UhisUI), and that is also the built-in default now. Way back: in
 the script's header.
+
+## More of the UI (2026-11-27)
+
+- **Speed:** `HMPSetSpeed(h, HMPSpeed_e)` exists in libhmplayer (no caller
+  in the stock code). The streaming backend's `speed()` (0x26bc0) passes
+  the value to the ES player and, above 99, calls
+  `HSPlayerStreaming::SetSpeed(v / 100.0)`: percent. Measured: with
+  `speed 150` HMP's own position (`HMPGetPts`, which vibe-play's clock
+  follows) advanced 1.5 s per second, back to 1.0 after `speed 100`; it
+  returns 1 if sent before playback has started. vibe-play: `speed P`
+  (25..400); its clock runs at the rate. Audio pitch at speed: not judged.
+- Overlay actions now: Channel, Follow/Unfollow, From the start,
+  **Speed** (1x, 1.25, 1.5, 1.75, 2, 0.75; kept for the session, applied
+  once each video plays), **Up to Np** (2160/1440/1080/720/480: saved in
+  the state file, the stream restarts at the same position with the new
+  cap; tested 1080 -> 720, speed re-applied), Description (a panel above).
+- **Channel page:** a Follow/Unfollow button top right (UP from the first
+  row). Home reloads when you come back to it after a follow or a watch.
+- Tested on the TV through the dev hook: description panel, channel page,
+  follow (its shelf on Home), quality switch, speed, a video to its end
+  (back to the list it was played from, recorded as watched).
+- Helper: positions are applied when a cached list is served.

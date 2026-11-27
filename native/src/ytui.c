@@ -47,7 +47,7 @@
 
 /* ------------------------------------------------------------ the worker */
 
-enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_PROGRESS, JB_FOLLOW };
+enum job_kind { JB_HOME, JB_SEARCH, JB_HISTORY, JB_CHANNEL, JB_OPEN, JB_REPLAY, JB_PROGRESS, JB_FOLLOW };
 
 struct job {
      enum job_kind kind;
@@ -137,6 +137,7 @@ static void *worker(void *arg)
                r->rc = yt_video(j.id, &r->vid);
                if (r->rc == 0) r->rc = yt_play(j.id, yt_maxh(), &r->play);
                break;
+          case JB_REPLAY:   r->rc = yt_play(j.id, j.n, &r->play); break;    /* another quality */
           case JB_PROGRESS: r->rc = yt_progress(j.id, j.pos, j.dur); break;
           case JB_FOLLOW:   r->rc = yt_follow(j.id, j.flag); break;
           }
@@ -150,7 +151,7 @@ static void *worker(void *arg)
 
 enum scr { Y_HOME, Y_CHANNEL, Y_PLAYER };
 enum { TAB_HOME, TAB_SEARCH, TAB_HISTORY, NTABS };
-enum { A_CHANNEL, A_FOLLOW, A_UNFOLLOW, A_RESTART, A_DESC };
+enum { A_CHANNEL, A_FOLLOW, A_UNFOLLOW, A_RESTART, A_DESC, A_SPEED, A_QUALITY };
 
 struct shelf {
      const char *title;
@@ -191,10 +192,12 @@ static struct {
      struct yt_item playing;      /* from the card at first, then the helper's */
      struct yt_video det;
      int  have_det;
-     struct button btn[5];
+     struct button btn[8];
      int  nbtn, bsel;
      int  osd_focus;              /* 0: the bar (seek, pause); 1: the actions */
      int  desc_on;                /* the description over the picture */
+     int  speed, speed_set;       /* percent (100 = normal), kept across videos; applied once playing */
+     int  ch_head;                /* the channel's Follow button has the focus */
      pid_t pid;
      char prev_input[64];
      int  to_fd, from_fd;
@@ -392,18 +395,20 @@ static void build_cards(void)
      cards_follow();
 }
 
-static void go(enum scr s)
-{
-     U.scr = s;
-     if (s != Y_PLAYER) build_cards();
-     U.dirty = 1;
-}
-
 static void load_home(void)
 {
      struct job j = { .kind = JB_HOME };
      post_browse(j, "Loading\xe2\x80\xa6");
      U.home_stale = 0;
+}
+
+static void go(enum scr s)
+{
+     U.scr = s;
+     if (s != Y_PLAYER) build_cards();
+     /* back on Home after a follow or a watch: its shelves changed */
+     if (s == Y_HOME && U.tab == TAB_HOME && U.home_stale) load_home();
+     U.dirty = 1;
 }
 
 static void open_channel(const char *cid)
@@ -417,7 +422,7 @@ static void open_channel(const char *cid)
 
 static void add_btn(const char *t, int a)
 {
-     if (U.nbtn < 5) {
+     if (U.nbtn < 8) {
           snprintf(U.btn[U.nbtn].title, sizeof U.btn[U.nbtn].title, "%s", t);
           U.btn[U.nbtn++].action = a;
      }
@@ -432,6 +437,18 @@ static void build_buttons(void)
           if (U.have_det) add_btn(U.det.followed ? "Unfollow" : "Follow", U.det.followed ? A_UNFOLLOW : A_FOLLOW);
      }
      if (!U.live) add_btn("From the start", A_RESTART);
+     if (!U.live) {
+          char t[32];
+          if (U.speed % 100 == 0) snprintf(t, sizeof t, "Speed %d\xc3\x97", U.speed / 100);
+          else if (U.speed % 25 == 0 && U.speed % 50) snprintf(t, sizeof t, "Speed %.2f\xc3\x97", U.speed / 100.0);
+          else snprintf(t, sizeof t, "Speed %.1f\xc3\x97", U.speed / 100.0);
+          add_btn(t, A_SPEED);
+     }
+     {
+          char t[32];
+          snprintf(t, sizeof t, "Up to %dp", yt_maxh());
+          add_btn(t, A_QUALITY);
+     }
      if (U.have_det && U.det.description) add_btn(U.desc_on ? "Hide description" : "Description", A_DESC);
      if (U.bsel >= U.nbtn) U.bsel = U.nbtn ? U.nbtn - 1 : 0;
 }
@@ -521,7 +538,7 @@ static void player_reap(void)
 static double cur_pos(double now)
 {
      if (U.seek_pending) return U.seek_target_ms;
-     return U.pos_ms + (U.pstate == 1 && U.pos_at > 0 ? (now - U.pos_at) * 1000.0 : 0);
+     return U.pos_ms + (U.pstate == 1 && U.pos_at > 0 ? (now - U.pos_at) * 1000.0 * U.speed / 100.0 : 0);
 }
 
 static void report(double now)
@@ -584,6 +601,7 @@ static void play_item(const struct yt_item *it)
      U.bsel = 0;
      U.toast_until = 0;
      memset(U.seg_done, 0, sizeof U.seg_done);
+     U.speed_set = 0;
      build_buttons();
      struct job j = { .kind = JB_OPEN };
      snprintf(j.id, sizeof j.id, "%s", it->id);
@@ -595,7 +613,11 @@ static void play_item(const struct yt_item *it)
 static void on_player_line(char *l, double now)
 {
      if (!strncmp(l, "state ", 6)) {
-          if (!strcmp(l + 6, "playing")) U.pstate = 1;
+          if (!strcmp(l + 6, "playing")) {
+               U.pstate = 1;
+               if (!U.speed_set && U.speed != 100) player_send("speed %d", U.speed);
+               U.speed_set = 1;
+          }
           else if (!strcmp(l + 6, "paused")) U.pstate = 2;
           U.dirty = 1;
      } else if (!strncmp(l, "pos ", 4)) {
@@ -678,6 +700,7 @@ void ytui_open(const struct jfui_host *h, double now)
           U.inited = 1;
           U.to_fd = U.from_fd = -1;
           U.tab_focus = 1;
+          U.speed = 100;
           yt_config_load();
           pthread_t t;
           pthread_attr_t at;
@@ -765,6 +788,7 @@ static void apply(struct result *r, double now)
           memset(&r->ch, 0, sizeof r->ch);
           U.have_ch = 1;
           U.ch_sel = U.ch_vtop = 0;
+          U.ch_head = 0;
           go(Y_CHANNEL);
           break;
      case JB_OPEN: {
@@ -798,6 +822,18 @@ static void apply(struct result *r, double now)
           }
           break;
      }
+     case JB_REPLAY:
+          if (U.scr != Y_PLAYER) break;
+          U.pos_ms = U.start_ms;
+          U.pos_at = 0;
+          U.pos_moved = 0;
+          U.seek_pending = 0;
+          U.speed_set = 0;
+          if (spawn_player(r->play.url, r->play.mime, U.start_ms) != 0) {
+               set_err("could not start the player", now);
+               go(U.play_back);
+          }
+          break;
      default:
           break;
      }
@@ -916,6 +952,39 @@ static void osd_action(double now)
           build_buttons();
           show_osd(now);
           break;
+     case A_SPEED: {
+          static const int steps[] = { 100, 125, 150, 175, 200, 75 };
+          int n = sizeof steps / sizeof steps[0], i = 0;
+          while (i < n && steps[i] != U.speed) i++;
+          U.speed = steps[(i + 1) % n];
+          if (U.pstate) player_send("speed %d", U.speed);
+          U.pos_ms = cur_pos(now);
+          U.pos_at = now;
+          build_buttons();
+          show_osd(now);
+          break;
+     }
+     case A_QUALITY: {
+          /* the cap cycles; the stream starts again where it is, in the new one */
+          static const int caps[] = { 2160, 1440, 1080, 720, 480 };
+          int n = sizeof caps / sizeof caps[0], i = 0;
+          while (i < n && caps[i] != yt_maxh()) i++;
+          int h = caps[(i + 1) % n];
+          if (yt_set_maxh(h) != 0) fprintf(stderr, "youtube: could not save the quality\n");
+          if (U.pstate == 0) { build_buttons(); show_osd(now); break; }
+          U.start_ms = cur_pos(now);
+          report(now);
+          player_send("stop keep");
+          player_reap();
+          U.pstate = 0;
+          snprintf(U.toast, sizeof U.toast, "Up to %dp", h);
+          U.toast_until = now + 3;
+          build_buttons();
+          struct job j = { .kind = JB_REPLAY, .n = h };
+          snprintf(j.id, sizeof j.id, "%s", U.playing.id);
+          post_browse(j, "");
+          break;
+     }
      }
 }
 
@@ -1080,6 +1149,31 @@ static int card_key(int k, int repeat, double now)
                U.kb_focus = 1; U.dirty = 1; return 1;
           }
      }
+     if (U.scr == Y_CHANNEL && U.ch_head) {           /* the Follow button */
+          switch (k) {
+          case DIKS_OK: case DIKS_RETURN: case DIKS_SELECT: {
+               if (repeat) return 1;
+               struct job j = { .kind = JB_FOLLOW, .flag = !U.ch.followed };
+               snprintf(j.id, sizeof j.id, "%s", U.ch.id);
+               post(j);
+               break;
+          }
+          case DIKS_CURSOR_DOWN: if (U.nsh) U.ch_head = 0; break;
+          case DIKS_BACK: case DIKS_EXIT:
+               if (repeat) return 1;
+               U.ch_head = 0;
+               save_cards();
+               go(U.ch_back);
+               return 1;
+          }
+          U.dirty = 1;
+          return 1;
+     }
+     if (U.scr == Y_CHANNEL && k == DIKS_CURSOR_UP && (!U.nsh || U.sh[0].sel < per_line())) {
+          U.ch_head = 1;
+          U.dirty = 1;
+          return 1;
+     }
      if (!U.nsh) {
           if ((k == DIKS_BACK || k == DIKS_EXIT) && !repeat) {
                if (U.scr == Y_HOME) U.tab_focus = 1;
@@ -1242,7 +1336,8 @@ static void draw_cards(struct canvas *c)
 {
      if (!U.nsh) return;
      cards_follow();
-     int focus = !(U.scr == Y_HOME && (U.tab_focus || (U.tab == TAB_SEARCH && U.kb_focus)));
+     int focus = !(U.scr == Y_HOME && (U.tab_focus || (U.tab == TAB_SEARCH && U.kb_focus))) &&
+                 !(U.scr == Y_CHANNEL && U.ch_head);
      struct shelf *g = &U.sh[0];
      if (g->grid) {
           int pl = per_line(), lh = grid_line_h(), shown = grid_lines_shown(), top = grid_top();
@@ -1456,7 +1551,21 @@ void ytui_draw(struct canvas *c, double now)
           if (U.scr == Y_CHANNEL) fit(U.h.f_title, U.ch.title, 1100, title, sizeof title);
           else snprintf(title, sizeof title, "YouTube");
           text(U.h.f_title, C_X0, 24, 70, K_TEXT, title, -1);
-          if (U.scr == Y_CHANNEL && U.ch.followed) text(U.h.f_small, W - C_X0, 24, 70, K_TEXT2, "Following", 1);
+     }
+     if (U.scr == Y_CHANNEL && U.have_ch) {            /* Follow / Unfollow, top right */
+          const char *t = U.ch.followed ? "Following \xe2\x9c\x93" : "Follow";
+          if (U.ch_head) t = U.ch.followed ? "Unfollow" : "Follow";
+          int bw = (int)strlen(t) * 18;
+          if (U.h.f_bold) U.h.f_bold->GetStringWidth(U.h.f_bold, t, -1, &bw);
+          bw += 64;
+          int bx = W - C_X0 - bw, by = 30;
+          if (c) {
+               if (U.ch_head) gfx_rrect(c, bx, by, bw, 60, 30, 0xffffffff);
+               else if (U.ch.followed) gfx_rrect_outline(c, bx, by, bw, 60, 30, 2, 0x60ffffff);
+               else gfx_rrect(c, bx, by, bw, 60, 30, K_RED);
+          } else {
+               text(U.h.f_bold, bx + bw / 2, by, 60, U.ch_head ? 0xff0b0e16 : K_TEXT, t, 0);
+          }
      }
      if (U.scr == Y_HOME) {
           draw_tabs(c);

@@ -16,6 +16,7 @@
  *        pause | resume | seek MS | stop | stop keep | rect X Y W H Z | pts
  *        ("stop keep": stop without switching back to the input)
  *        track audio K   (the K-th audio track of the file, 0-based)
+ *        speed P         (playback speed in percent, 100 = normal; HMPSetSpeed)
  *   out: also "track N id ID type T lang L [selected]" once the player has
  *        the track list
  *   out: state opening|prepared|playing|paused|stopped
@@ -85,6 +86,7 @@ static struct {
      int (*SetComponentMuteState)(hmp_t, int, int);
      int (*SetSubtitleShowState)(hmp_t, int);
      int (*SelectTrack)(hmp_t, int type, int id);
+     int (*SetSpeed)(hmp_t, int speed);     /* optional; HMPSpeed_e, see "speed" */
 } H;
 
 /* ---- output ------------------------------------------------------------- */
@@ -122,13 +124,14 @@ static pthread_mutex_t st_lock = PTHREAD_MUTEX_INITIALIZER;
 static int playing, paused, started;
 /* our own clock: position = base + (now - since) while playing */
 static double pos_base_ms, pos_since;
+static double rate = 1.0;      /* the playback speed ("speed"): the clock runs at it */
 
 static double now_ms(void) { return vibe_now_s() * 1000.0; }
 
 static double position(void)
 {
      pthread_mutex_lock(&st_lock);
-     double p = pos_base_ms + (playing && !paused ? now_ms() - pos_since : 0);
+     double p = pos_base_ms + (playing && !paused ? (now_ms() - pos_since) * rate : 0);
      pthread_mutex_unlock(&st_lock);
      return p;
 }
@@ -376,6 +379,7 @@ static int load(void)
      SYM(Prepare); SYM(Start); SYM(Pause); SYM(Resume); SYM(Seek); SYM(Stop); SYM(Destroy);
      SYM(GetPts); SYM(SetDisplayRect); SYM(SetComponentMuteState); SYM(SetSubtitleShowState);
      SYM(SelectTrack);
+     *(void **)&H.SetSpeed = dlsym(H.lib, "HMPSetSpeed");     /* optional */
 #undef SYM
      return 0;
 }
@@ -713,6 +717,20 @@ int main(int argc, char **argv)
                r = H.Seek(player, ms);
                if (r == 0) clock_set((double)ms, !paused);
                say("seek %llu -> %d", (unsigned long long)ms, r);
+          } else if (!strncmp(line, "speed ", 6)) {
+               /* HMPSpeed_e: the streaming backend's speed() passes it to the ES
+                * player and, above 99, calls HSPlayerStreaming::SetSpeed(v /
+                * 100.0) (libhmplayer 0x26bc0): read as percent, 100 = 1x
+                * (inferred; checked on the screen) */
+               int v = atoi(line + 6);
+               if (player && H.SetSpeed && v >= 25 && v <= 400) {
+                    double p = position();
+                    r = H.SetSpeed(player, v);
+                    if (r == 0) { clock_set(p, !paused); rate = v / 100.0; }
+                    say("speed %d -> %d", v, r);
+               } else {
+                    say("speed %d -> unsupported", v);
+               }
           } else if (!strncmp(line, "track audio ", 12)) {
                if (player) select_audio(atoi(line + 12));
           } else if (!strncmp(line, "rect ", 5)) {

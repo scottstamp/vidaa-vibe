@@ -163,6 +163,17 @@ def item_of(e):
         it["position"] = p.get("pos", 0)
     return it
 
+def with_positions(items):
+    """cached lists carry the positions of when they were made: current ones"""
+    out = []
+    for it in items:
+        it = dict(it)
+        p = STATE.progress(it["id"])
+        if p:
+            it["position"] = p.get("pos", 0)
+        out.append(it)
+    return out
+
 def is_video_entry(e):
     return len(e.get("id") or "") == 11 and e.get("ie_key", "Youtube") in ("Youtube", None)
 
@@ -192,6 +203,7 @@ def channel(cid, n):
         r = LIST_CACHE.put(k, {"id": cid, "title": title, "avatar": avatar_of(info),
                                "items": [item_of(e) for e in info.get("entries") or [] if is_video_entry(e)]})
     out = dict(r)
+    out["items"] = with_positions(r["items"])
     out["followed"] = STATE.is_followed(cid)
     return out
 
@@ -374,7 +386,7 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/home":
                 return self.send(200, home())
             if p == "/api/search":
-                return self.send(200, {"items": search(q.get("q", ""), min(int(q.get("n", 24)), 60))})
+                return self.send(200, {"items": with_positions(search(q.get("q", ""), min(int(q.get("n", 24)), 60)))})
             if p == "/api/channel":
                 return self.send(200, channel(vid, min(int(q.get("n", 48)), 120)))
             if p == "/api/video":
